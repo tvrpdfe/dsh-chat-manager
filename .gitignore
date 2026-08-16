@@ -1,0 +1,8 @@
+# dependencies
+node_modules/
+
+# scratch: generated artifacts only (spec.md is tracked; tooling lives in tools/)
+.scratch/*.html
+.scratch/*.png
+.scratch/*.txt
+.scratch/client-r5.bak.js

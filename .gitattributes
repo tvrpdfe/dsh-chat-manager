@@ -1,0 +1,3 @@
+# Normalize line endings to LF. The patch scripts match literal "\n" anchors
+# inside the fork bundle, so CRLF conversions would break their replay.
+* text=auto eol=lf
