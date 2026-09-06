@@ -1,0 +1,506 @@
+diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\rows\\WorkspaceBrowser.tsx" "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\rows\\WorkspaceBrowser.tsx"
+index 0ef21dd..3301b9a 100644
+--- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\rows\\WorkspaceBrowser.tsx"
++++ "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\rows\\WorkspaceBrowser.tsx"
+@@ -9,7 +9,7 @@
+  * menu in between; the flow and its error dialog live in WorkspacePicker
+  * (same package — direct composition, no slot between them).
+  */
+-import { useEffect, useMemo, useRef, useState } from 'react'
++import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+ import clsx from 'clsx'
+ import {
+   Button, IconCloseFill14, IconPersonalizationOutline16,
+@@ -28,6 +28,11 @@ import {
+ import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
+ import { FLAT_SESSION_ORDER_KEY } from '../stores.ts'
+ import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
++import { ChatSection } from '../addon/ChatSection.tsx'
++import {
++  deletedIdsSource, performSessionDelete, pruneDeletedIds, runChatFlow, setChatRuntimeSnapshot,
++} from '../addon/chat-runtime.ts'
++import { isUnderChatRoot } from '../../shared/paths.ts'
+ import css from './WorkspaceBrowser.module.css'
+ 
+ /**
+@@ -36,9 +41,9 @@ import css from './WorkspaceBrowser.module.css'
+  */
+ const EXPAND_SLIDE_MS = 300
+ /** Pause between the latest keystroke and a Host content-search request. */
+-const SEARCH_DEBOUNCE_MS = 250
++export const SEARCH_DEBOUNCE_MS = 250
+ /** `session.search` wire bound, measured in JavaScript UTF-16 code units. */
+-const SEARCH_QUERY_MAX_CODE_UNITS = 500
++export const SEARCH_QUERY_MAX_CODE_UNITS = 500
+ /** Session rows visible per Workspace before the local overflow control. */
+ const COLLAPSED_SESSION_LIMIT = 5
+ 
+@@ -58,7 +63,7 @@ function collapsedSessionRows(sessions: readonly SessionNode[]): {
+ }
+ 
+ /** Keep controlled input and RPC payload inside the session.search wire contract. */
+-function sanitizeSearchQuery(value: string): string {
++export function sanitizeSearchQuery(value: string): string {
+   const withoutNul = value.replaceAll('\0', '')
+   if (withoutNul.length <= SEARCH_QUERY_MAX_CODE_UNITS) return withoutNul
+   let end = SEARCH_QUERY_MAX_CODE_UNITS
+@@ -256,6 +261,10 @@ type SessionTreeProps = Pick<
+   setSessionOrder: (accountKey: string, order: string[]) => void
+   /** Registry-global archive set (hidden rows). */
+   archivedSessionIds: readonly SessionNode['id'][]
++  /** Plugin exclusions: chat sessions + deleted tombstones (hidden from the workspace areas). */
++  excludedSessionIds: ReadonlySet<SessionId>
++  /** Open the browser-owned session delete-confirmation dialog. */
++  onSessionDelete: (sessionId: SessionNode['id'], currentTitle: string) => void
+   /** Open the browser-owned rename dialog for a real Workspace group. */
+   onRenameRequest: (workspaceId: WorkspaceId, currentTitle: string) => void
+   /** Open the browser-owned delete-confirmation dialog for a real Workspace group. */
+@@ -275,7 +284,7 @@ type SessionTreeProps = Pick<
+ /** The scrolling session tree; unmounting drops the sessions subscription and expand-all state. */
+ function SessionTree({
+   useSessions, useSessionPendingInteraction, startSession, open, forkSession, workspaces, archivedSessionIds,
+-  workspaceReady,
++  workspaceReady, excludedSessionIds, onSessionDelete,
+   onRenameRequest, onDeleteRequest, onSessionRename, onSessionArchive,
+   insertWorkspaceBefore, insertSessionBefore, orderBy,
+   groupExpansion, setGroupExpanded,
+@@ -356,8 +365,8 @@ function SessionTree({
+       ...(sessionOrderByAccount[UNGROUPED_KEY] === undefined
+         ? {}
+         : { ungroupedOrder: sessionOrderByAccount[UNGROUPED_KEY] }),
+-    }),
+-    [list, orderedWorkspaces, archivedSessionIds, pendingInteractions, expandedGroups, sessionOrderByAccount],
++    }, excludedSessionIds),
++    [list, orderedWorkspaces, archivedSessionIds, pendingInteractions, expandedGroups, sessionOrderByAccount, excludedSessionIds],
+   )
+   useEffect(() => {
+     if (revealGroup === undefined || groupExpansion[revealGroup] === true) return
+@@ -587,6 +596,7 @@ function SessionTree({
+                     onRename={onSessionRename}
+                     onFork={forkSession}
+                     onArchive={onSessionArchive}
++                    onDelete={onSessionDelete}
+                     onReveal={node.id === revealSessionId && group.key === revealGroup
+                       ? () => { onSessionRevealed(node.id) }
+                       : undefined}
+@@ -619,7 +629,7 @@ function SessionTree({
+ /** The flat "In one list" body: every session is one draggable top-level row. */
+ function FlatList({
+   useSessions, useSessionPendingInteraction, open, forkSession, onSessionRename, onSessionArchive,
+-  archivedSessionIds,
++  archivedSessionIds, excludedSessionIds, onSessionDelete,
+   orderBy, sessionOrderByAccount, sessionUpdatedAtByAccount, syncSessionOrderAccount, setSessionOrder,
+   revealSessionId, onSessionRevealed, t,
+ }: Pick<
+@@ -630,7 +640,9 @@ function FlatList({
+   | 'forkSession'
+   | 'onSessionRename'
+   | 'onSessionArchive'
++  | 'onSessionDelete'
+   | 'archivedSessionIds'
++  | 'excludedSessionIds'
+   | 'orderBy'
+   | 'sessionOrderByAccount'
+   | 'sessionUpdatedAtByAccount'
+@@ -643,8 +655,8 @@ function FlatList({
+   const list = useSessions(s => s)
+   const pendingInteractions = useSessionPendingInteraction(s => s)
+   const baseRows = useMemo(
+-    () => deriveFlat(list, archivedSessionIds, pendingInteractions),
+-    [list, archivedSessionIds, pendingInteractions],
++    () => deriveFlat(list, archivedSessionIds, pendingInteractions, excludedSessionIds),
++    [list, archivedSessionIds, pendingInteractions, excludedSessionIds],
+   )
+   const sessionIds = useMemo(() => baseRows.map(row => row.id), [baseRows])
+   const previousOrderBy = useRef(orderBy)
+@@ -712,6 +724,7 @@ function FlatList({
+               onRename={onSessionRename}
+               onFork={forkSession}
+               onArchive={onSessionArchive}
++              onDelete={onSessionDelete}
+               onReveal={node.id === revealSessionId
+                 ? () => { onSessionRevealed(node.id) }
+                 : undefined}
+@@ -762,6 +775,7 @@ function SearchResults({
+   query,
+   remote,
+   resultLimit,
++  excludedSessionIds,
+   t,
+ }: Pick<SessionTreeProps, 'useSessions' | 'useSessionPendingInteraction' | 'open' | 't'> & {
+   workspaces: readonly WorkspaceView[]
+@@ -769,14 +783,15 @@ function SearchResults({
+   query: string
+   remote: RemoteSearchState
+   resultLimit: number
++  excludedSessionIds: ReadonlySet<SessionId>
+ }) {
+   const list = useSessions(s => s)
+   const pendingInteractions = useSessionPendingInteraction(s => s)
+   const currentRemote = remote.query === query
+     ? remote
+     : { query, status: 'loading' as const, items: [], hasMore: false }
+-  const results = useMemo(
+-    () => deriveSearchResults(
++  const results = useMemo(() => {
++    const derived = deriveSearchResults(
+       list,
+       workspaces,
+       query,
+@@ -784,9 +799,13 @@ function SearchResults({
+       pendingInteractions,
+       currentRemote,
+       resultLimit,
+-    ),
+-    [list, workspaces, query, archivedSessionIds, pendingInteractions, currentRemote, resultLimit],
+-  )
++    )
++    return {
++      ...derived,
++      items: derived.items.filter(row => !excludedSessionIds.has(row.id)),
++      hasMore: derived.hasMore,
++    }
++  }, [list, workspaces, query, archivedSessionIds, pendingInteractions, currentRemote, resultLimit, excludedSessionIds])
+   const pending = currentRemote.status === 'loading'
+   const failed = currentRemote.status === 'error'
+ 
+@@ -853,6 +872,10 @@ export function WorkspaceBrowser({
+   searchResultLimit,
+   useDirectoryFlow,
+   useHostInfo,
++  useChat,
++  deleteSession,
++  chatSearch,
++  startChat,
+   renderSlot,
+   t,
+ }: WorkspaceBrowserProps) {
+@@ -864,6 +887,67 @@ export function WorkspaceBrowser({
+   // Live occupancy of this surface's directory-flow hole (the same source the
+   // flow reads): a composition without a picking affordance can add nothing.
+   const directoryFlowAvailable = useDirectoryFlow(occupied => occupied)
++  // ---- dsh-chat-manager: chat root, tombstones, and split state ----
++  const chatSnapshot = useChat(s => s)
++  const chatRoot: string | null = typeof chatSnapshot?.root === 'string' ? chatSnapshot.root : null
++  const listSnapshot = useSessions(s => s)
++  const chatSessionIds = useMemo(() => {
++    const ids = new Set<SessionId>()
++    if (chatRoot !== null) {
++      for (const id of listSnapshot.ids) {
++        const session = listSnapshot.byId[id]
++        if (session !== undefined && session.cwd !== undefined && isUnderChatRoot(session.cwd, chatRoot)) ids.add(id)
++      }
++    }
++    return ids
++  }, [listSnapshot, chatRoot])
++  // The date-folder Workspaces (chat roots) never show in the workspace area.
++  const workspaceAreaWorkspaces = useMemo(
++    () => chatRoot === null
++      ? workspaces
++      : workspaces.filter(workspace => !isUnderChatRoot(workspace.path, chatRoot)),
++    [workspaces, chatRoot],
++  )
++  const deletedIds = useSyncExternalStore(deletedIdsSource.subscribe, deletedIdsSource.getSnapshot)
++  const excludedSessionIds = useMemo(() => {
++    const set = new Set<SessionId>(chatSessionIds)
++    for (const id of deletedIds) set.add(id)
++    return set
++  }, [chatSessionIds, deletedIds])
++  useEffect(() => {
++    if (listSnapshot.phase !== 'ready') return
++    if (deletedIds.size === 0) return
++    pruneDeletedIds(new Set<SessionId>(listSnapshot.ids))
++  }, [listSnapshot, deletedIds])
++  useEffect(() => {
++    setChatRuntimeSnapshot({
++      currentId: listSnapshot.current,
++      chatIds: chatSessionIds,
++      workspaces: workspaces.map(workspace => ({
++        path: workspace.path,
++        workspaceId: workspace.workspaceId,
++      })),
++    })
++  }, [listSnapshot, chatSessionIds, workspaces])
++  const splitRef = useRef<HTMLDivElement | null>(null)
++  const [splitRatio, setSplitRatio] = useState(0.5)
++  const startSplitDrag = (e: React.MouseEvent): void => {
++    e.preventDefault()
++    const onMove = (ev: MouseEvent): void => {
++      const el = splitRef.current
++      if (el === null) return
++      const rect = el.getBoundingClientRect()
++      if (rect.height < 1) return
++      const minFrac = Math.min(80 / rect.height, 0.45)
++      setSplitRatio(Math.min(1 - minFrac, Math.max(minFrac, (ev.clientY - rect.top) / rect.height)))
++    }
++    const onUp = (): void => {
++      document.removeEventListener('mousemove', onMove)
++      document.removeEventListener('mouseup', onUp)
++    }
++    document.addEventListener('mousemove', onMove)
++    document.addEventListener('mouseup', onUp)
++  }
+   const groupBy = useStore(s => s.groupBy)
+   const orderBy = useStore(s => s.orderBy)
+   const groupExpansion = useStore(s => s.groupExpansion)
+@@ -900,9 +984,9 @@ export function WorkspaceBrowser({
+     actions.retainAccountKeys([
+       UNGROUPED_KEY,
+       FLAT_SESSION_ORDER_KEY,
+-      ...workspaces.map(workspace => workspace.workspaceId as string),
++      ...workspaceAreaWorkspaces.map(workspace => workspace.workspaceId as string),
+     ])
+-  }, [actions.retainAccountKeys, workspacePhase, workspaces])
++  }, [actions.retainAccountKeys, workspacePhase, workspaceAreaWorkspaces])
+   // The query outlives the tree and the input (both wide-only) so collapsing
+   // does not silently drop an in-progress filter.
+   const [query, setQuery] = useState('')
+@@ -1114,6 +1198,102 @@ export function WorkspaceBrowser({
+     })
+   }
+ 
++  // ---- dsh-chat-manager: session delete (browser-owned confirm dialog) ----
++  const [sessionDeleteTarget, setSessionDeleteTarget] = useState<{ sessionId: SessionId; title: string } | null>(null)
++  const [sessionDeleting, setSessionDeleting] = useState(false)
++  const [sessionDeleteError, setSessionDeleteError] = useState<string | null>(null)
++  const onSessionDelete = (sessionId: SessionId, title: string): void => {
++    setSessionDeleteTarget({ sessionId, title })
++    setSessionDeleteError(null)
++  }
++  const closeSessionDelete = (): void => {
++    if (sessionDeleting) return
++    setSessionDeleteTarget(null)
++    setSessionDeleteError(null)
++  }
++  const confirmSessionDelete = (): void => {
++    if (sessionDeleting || sessionDeleteTarget === null) return
++    setSessionDeleting(true)
++    setSessionDeleteError(null)
++    performSessionDelete(sessionDeleteTarget.sessionId).then(() => {
++      setSessionDeleting(false)
++      setSessionDeleteTarget(null)
++    }).catch((reason: unknown) => {
++      setSessionDeleting(false)
++      setSessionDeleteError(reason instanceof Error ? reason.message : String(reason))
++    })
++  }
++
++  // The wide/rail branches render the same list bodies; their props blocks
++  // (including the dialog-opener lambdas) are built once and spread into both.
++  const sessionTreeProps = {
++    useSessions, useSessionPendingInteraction,
++    onSessionRename, onSessionArchive, onSessionDelete, forkSession,
++    archivedSessionIds, excludedSessionIds, orderBy,
++    sessionOrderByAccount, sessionUpdatedAtByAccount,
++    syncSessionOrderAccount: actions.syncSessionOrderAccount,
++    setSessionOrder: actions.setSessionOrder,
++    revealSessionId, onSessionRevealed: acknowledgeSessionReveal,
++    home, t,
++    onRenameRequest: (workspaceId: WorkspaceId, currentTitle: string) => {
++      setRenameTarget({ workspaceId, currentTitle })
++      setRenameDraft(currentTitle)
++      setRenameError(null)
++    },
++    onDeleteRequest: (workspaceId: WorkspaceId, title: string) => {
++      setDeleteTarget({ workspaceId, title })
++      setDeleteError(null)
++    },
++  }
++  const flatListProps = {
++    useSessions, useSessionPendingInteraction, forkSession,
++    onSessionRename, onSessionArchive, onSessionDelete,
++    archivedSessionIds, excludedSessionIds, orderBy,
++    sessionOrderByAccount, sessionUpdatedAtByAccount,
++    syncSessionOrderAccount: actions.syncSessionOrderAccount,
++    setSessionOrder: actions.setSessionOrder, revealSessionId,
++    onSessionRevealed: acknowledgeSessionReveal, t,
++  }
++
++  // The wide/rail branches render the same list body; its elements and props
++  // blocks are built once and shared (wide XOR rail, so the same element
++  // instance lands in at most one branch per render).
++  const listBody = normalizedQuery !== ''
++    ? (
++      <SearchResults
++        useSessions={useSessions}
++        useSessionPendingInteraction={useSessionPendingInteraction}
++        open={openSearchResult}
++        workspaces={workspaces}
++        archivedSessionIds={archivedSessionIds}
++        query={normalizedQuery}
++        remote={remoteSearch}
++        resultLimit={searchResultLimit}
++        excludedSessionIds={excludedSessionIds}
++        t={t}
++      />
++    )
++    : groupBy === 'flat'
++      ? (
++        <FlatList
++          {...flatListProps}
++          open={open}
++        />
++      )
++      : (
++        <SessionTree
++          {...sessionTreeProps}
++          workspaces={workspaceAreaWorkspaces}
++          workspaceReady={workspacePhase === 'ready' && workspaceStreamState !== 'loading'}
++          groupExpansion={groupExpansion}
++          setGroupExpanded={actions.setGroupExpanded}
++          startSession={startSession}
++          open={open}
++          insertWorkspaceBefore={insertWorkspaceBefore}
++          insertSessionBefore={insertSessionBefore}
++        />
++      )
++
+   return (
+     <div className={clsx(css.root, !wide && css.rail)}>
+       <div className={css.sectionHeader}>
+@@ -1246,76 +1426,47 @@ export function WorkspaceBrowser({
+       </div>}
+ 
+       {/* Always-mounted seat keeps the region's flex slot while the list
+-          itself is wide-only. */}
+-      <div className={css.listArea}>
+-        {wide && (normalizedQuery !== ''
+-          ? (
+-            <SearchResults
++          itself is wide-only. Wide state renders the workspace pane, the
++          drag divider, and the chat pane (dsh-chat-manager split). */}
++      {wide ? (
++        <div ref={splitRef} className={css.split}>
++          <div className={css.pane} style={{ flexBasis: `${(splitRatio * 100).toFixed(2)}%` }}>
++            <div className={css.listArea}>
++              {listBody}
++            </div>
++          </div>
++          <div className={css.divider} onMouseDown={startSplitDrag} />
++          <div className={css.pane} style={{ flexBasis: `${((1 - splitRatio) * 100).toFixed(2)}%` }}>
++            <ChatSection
++              wide={wide}
+               useSessions={useSessions}
+               useSessionPendingInteraction={useSessionPendingInteraction}
+-              open={openSearchResult}
+-              workspaces={workspaces}
+-              archivedSessionIds={archivedSessionIds}
+-              query={normalizedQuery}
+-              remote={remoteSearch}
+-              resultLimit={searchResultLimit}
++              useWorkspaces={useWorkspaces}
++              useChat={useChat}
++              deletedSessionIds={deletedIds}
++              open={open}
++              onRename={onSessionRename}
++              onFork={forkSession}
++              onArchive={onSessionArchive}
++              onDelete={onSessionDelete}
++              onNewChat={() => {
++                // Shared in-flight gate (also used by the routed New Session
++                // path): the ensure-date-folder + workspace-visibility wait
++                // can take a few seconds, and a double click must not open
++                // two chats.
++                runChatFlow(startChat)
++              }}
++              searchChats={chatSearch}
+               t={t}
+             />
+-          )
+-          : groupBy === 'flat'
+-            ? (
+-              <FlatList
+-                useSessions={useSessions} useSessionPendingInteraction={useSessionPendingInteraction}
+-                open={open} forkSession={forkSession}
+-                onSessionRename={onSessionRename} onSessionArchive={onSessionArchive}
+-                archivedSessionIds={archivedSessionIds}
+-                orderBy={orderBy}
+-                sessionOrderByAccount={sessionOrderByAccount}
+-                sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
+-                syncSessionOrderAccount={actions.syncSessionOrderAccount}
+-                setSessionOrder={actions.setSessionOrder}
+-                revealSessionId={revealSessionId}
+-                onSessionRevealed={acknowledgeSessionReveal}
+-                t={t}
+-              />
+-            )
+-            : (
+-              <SessionTree
+-                useSessions={useSessions}
+-                useSessionPendingInteraction={useSessionPendingInteraction}
+-                onSessionRename={onSessionRename}
+-                onSessionArchive={onSessionArchive}
+-                forkSession={forkSession}
+-                workspaces={workspaces}
+-                workspaceReady={workspacePhase === 'ready' && workspaceStreamState !== 'loading'}
+-                groupExpansion={groupExpansion}
+-                setGroupExpanded={actions.setGroupExpanded}
+-                sessionOrderByAccount={sessionOrderByAccount}
+-                sessionUpdatedAtByAccount={sessionUpdatedAtByAccount}
+-                syncSessionOrderAccount={actions.syncSessionOrderAccount}
+-                setSessionOrder={actions.setSessionOrder}
+-                archivedSessionIds={archivedSessionIds}
+-                startSession={startSession}
+-                open={open}
+-                insertWorkspaceBefore={insertWorkspaceBefore}
+-                insertSessionBefore={insertSessionBefore}
+-                orderBy={orderBy}
+-                revealSessionId={revealSessionId}
+-                onSessionRevealed={acknowledgeSessionReveal}
+-                home={home}
+-                t={t}
+-                onRenameRequest={(workspaceId, currentTitle) => {
+-                  setRenameTarget({ workspaceId, currentTitle })
+-                  setRenameDraft(currentTitle)
+-                  setRenameError(null)
+-                }}
+-                onDeleteRequest={(workspaceId, title) => {
+-                  setDeleteTarget({ workspaceId, title })
+-                  setDeleteError(null)
+-                }}
+-              />
+-            ))}
+-      </div>
++          </div>
++        </div>
++      ) : (
++        <div className={css.listArea}>
++          {/* Rail: the workspace list seat stays mounted; no chat pane. */}
++          {listBody}
++        </div>
++      )}
+ 
+       <Modal
+         open={renameTarget !== null}
+@@ -1408,6 +1559,31 @@ export function WorkspaceBrowser({
+         {deleting && <div className={css.deleteStatus} role="status">{t('delete.pending')}</div>}
+         {deleteError !== null && <div className={css.renameError} role="alert">{deleteError}</div>}
+       </Modal>
++      <Modal
++        open={sessionDeleteTarget !== null}
++        onClose={closeSessionDelete}
++        closeLabel={t('close')}
++        title={t('delete.session')}
++        {...sessionDeleteTarget === null
++          ? {}
++          : { description: t('delete.session.desc', { name: sessionDeleteTarget.title }) }}
++        footer={(
++          <>
++            <Button variant="outline" disabled={sessionDeleting} onClick={closeSessionDelete}>{t('cancel')}</Button>
++            <Button
++              variant="outline"
++              className={css.deleteAction}
++              disabled={sessionDeleting}
++              onClick={confirmSessionDelete}
++            >
++              {t('delete.session')}
++            </Button>
++          </>
++        )}
++      >
++        {sessionDeleting && <div className={css.deleteStatus} role="status">{t('delete.session.pending')}</div>}
++        {sessionDeleteError !== null && <div className={css.renameError} role="alert">{sessionDeleteError}</div>}
++      </Modal>
+     </div>
+   )
+ }

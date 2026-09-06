@@ -1,0 +1,36 @@
+diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\locales.ts" "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\locales.ts"
+index af0f535..6532203 100644
+--- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\locales.ts"
++++ "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\locales.ts"
+@@ -45,6 +45,15 @@ export const zh = {
+   'delete.pending': '正在删除工作区…',
+   'menu.fork': '分叉会话',
+   'menu.archiveSession': '归档会话',
++  'menu.deleteSession': '删除会话',
++  'delete.session': '删除会话',
++  'delete.session.desc': '将删除“{name}”的聊天记录。其文件夹会保留在磁盘上。此操作不可撤销。',
++  'delete.session.pending': '正在删除会话…',
++  'chat.section': '聊天',
++  'chat.add': '新建聊天',
++  'chat.empty': '暂无聊天',
++  'chat.search.placeholder': '搜索聊天…',
++  'chat.search.aria': '搜索聊天',
+   'sessions.count.one': '{n} 个会话',
+   'sessions.count.other': '{n} 个会话',
+   'actions.workspace.aria': '工作区“{name}”的操作',
+@@ -115,6 +124,15 @@ export const en = {
+   'delete.pending': 'Deleting workspace…',
+   'menu.fork': 'Fork session',
+   'menu.archiveSession': 'Archive session',
++  'menu.deleteSession': 'Delete session',
++  'delete.session': 'Delete session',
++  'delete.session.desc': 'This deletes the conversation record of “{name}”. Its folder is kept on disk. This cannot be undone.',
++  'delete.session.pending': 'Deleting session…',
++  'chat.section': 'Chats',
++  'chat.add': 'New chat',
++  'chat.empty': 'No chats yet',
++  'chat.search.placeholder': 'Search chats…',
++  'chat.search.aria': 'Search chats',
+   'sessions.count.one': '{n} session',
+   'sessions.count.other': '{n} sessions',
+   'actions.workspace.aria': 'Workspace actions for {name}',

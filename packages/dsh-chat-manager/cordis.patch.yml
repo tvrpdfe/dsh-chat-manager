@@ -16,6 +16,10 @@
 #  copy neutralized to plain 文件夹 for workspace sessions too)
 # (reload marker r8: settings page time keys - chatManager dictionary gains
 #  the time.* keys so the archived list shows real relative time labels)
+# (reload marker r9: migrate client runtime dependency to dsh-client-store for
+#  Harness 0.1.3-alpha.1 / 0.1.2-rc.1)
+# (reload marker r10: TS source fork (vendor ui-workspace src, esbuild build),
+#  working tree + platform-seed externals only, shim bundle dropped)
 - id: ui-workspace
   disabled: true
 

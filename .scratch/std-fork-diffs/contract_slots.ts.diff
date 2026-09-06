@@ -1,0 +1,41 @@
+diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\contract\\slots.ts" "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\contract\\slots.ts"
+index df17251..134777f 100644
+--- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\contract\\slots.ts"
++++ "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\contract\\slots.ts"
+@@ -31,6 +31,8 @@ import type { SessionSearchResultItem } from '@deepseek-ai/dsh-api-session-contr
+ import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
+ import type { WorkspaceId, WorkspaceView } from '@deepseek-ai/dsh-api-workspace-controller/client'
+ import type { SessionId } from '@deepseek-ai/dsh-session/types'
++import type { ChatManagerState } from '../addon/chat-runtime.ts'
++import type { ChatSearchHit } from '../../shared/chat.ts'
+ import type { createWorkspaceViewStore } from '../stores.ts'
+ 
+ /**
+@@ -96,6 +98,11 @@ export type WorkspaceBrowserInjected = {
+      * saw. Select the field the surface needs (`info => info.home`).
+      */
+     hostInfo: HostObservable<RemoteHostFacts>
++    /**
++     * Chat-folder state (root + session folder registry), pushed by the
++     * plugin entry after every mutation through `/api/chat-manager/state`.
++     */
++    chat: HostObservable<ChatManagerState>
+   }
+   /**
+    * Start a New Session in a Workspace: reuse-or-create its blank session and
+@@ -142,6 +149,15 @@ export type WorkspaceBrowserInjected = {
+   insertSessionBefore: (workspaceId: WorkspaceId, sessionId: SessionId, beforeSessionId?: SessionId) => Promise<void>
+   /** Adopt a picked host directory as a real Workspace before targeting a Session. */
+   createWorkspace: (input: { path: string }) => Promise<WorkspaceView>
++  /**
++   * Permanently delete a Session through the Host route (log artifact,
++   * workspace accounting, archive ledger) and resolve once the Host is done.
++   */
++  deleteSession: (sessionId: SessionId) => Promise<void>
++  /** Search chat sessions only: title substring plus Host content hits. */
++  chatSearch: (query: string) => Promise<ChatSearchHit[]>
++  /** Ensure today's chat date-folder Workspace and start a chat Session in it. */
++  startChat: () => Promise<void>
+ }
+ 
+ /** Full browser props: shell owner share + viewing store + injected actions + the locale seat. */

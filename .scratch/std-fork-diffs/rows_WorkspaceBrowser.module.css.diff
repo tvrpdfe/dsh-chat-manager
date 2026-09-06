@@ -1,0 +1,86 @@
+diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\rows\\WorkspaceBrowser.module.css" "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\rows\\WorkspaceBrowser.module.css"
+index 1ce0f8e..26ab435 100644
+--- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\rows\\WorkspaceBrowser.module.css"
++++ "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\rows\\WorkspaceBrowser.module.css"
+@@ -503,3 +503,81 @@
+     transition: none;
+   }
+ }
++
++/* ---- dsh-chat-manager additions ---- */
++.chatSection {
++  flex: 1;
++  min-height: 0;
++  display: flex;
++  flex-direction: column;
++  min-width: 0;
++}
++
++.chatList {
++  flex: 1;
++  min-height: 0;
++}
++
++.split {
++  flex: 1;
++  min-height: 0;
++  display: flex;
++  flex-direction: column;
++  padding-top: 2px;
++}
++
++.pane {
++  min-height: 0;
++  display: flex;
++  flex-direction: column;
++}
++
++.divider {
++  flex: none;
++  height: 8px;
++  cursor: row-resize;
++  display: flex;
++  align-items: center;
++  justify-content: center;
++  touch-action: none;
++}
++
++.divider::before {
++  content: '';
++  width: 28px;
++  height: 2px;
++  border-radius: 1px;
++  background: var(--dsw-alias-interactive-border, rgba(128, 128, 128, 0.35));
++}
++
++.archivedPage {
++  display: flex;
++  flex-direction: column;
++  gap: 8px;
++  padding: 4px 0;
++}
++
++.archivedRow {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  padding: 8px 12px;
++  border-radius: 10px;
++  background: var(--dsw-alias-interactive-bg-subtle, transparent);
++}
++
++.archivedTitle {
++  flex: 1;
++  min-width: 0;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++  color: var(--dsw-alias-label-primary, inherit);
++}
++
++.archivedTime {
++  flex: none;
++  color: var(--dsw-alias-label-tertiary, inherit);
++  font-size: 12px;
++  line-height: 17px;
++}

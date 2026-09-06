@@ -53,9 +53,10 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 ### 交付形态（决策 1 的演进）
 
 - 动态插件方案被废弃（自绘 UI 无法达到视觉/交互一致性，插件已被用户删除）。改为**固化进宿主组合的 bundle 插件**：插件包声明 `dsh.bundle`（随包分发 `cordis.patch.yml`：禁用内置 `ui-workspace` 行、插入 `ui-chat-manager`），`dsh plugin add/install` 自动把它注册进 profile 的 `dsh.profile.bundles` 层栈，用户无需编辑补丁层；宿主半 `lib/index.js` + 浏览器半 `lib/client.js` 经 profile 的 pnpm 依赖（`link:` 或 `workspace:*`）安装。
-- 浏览器半是内置 `@deepseek-ai/dsh-client-ui-workspace` 客户端 bundle 的**字节级拷贝 + 五组外科补丁**（见下），因此 CSS、图标、行组件、菜单行为与内置版本天然一致。代价是后续 DSH 升级不会自动跟随上游视觉，需要时可重新同步一次。
+- 浏览器半是内置 `@deepseek-ai/dsh-client-ui-workspace` 客户端源码的 **TS/TSX 分叉**（`src/client/` 从 DSH 源码检出拷贝，分叉改动见下），以 esbuild 构建为 `__ModuleLoader__.load` 工厂 bundle（仅 require 平台种子词：react/jsx-runtime、cordis、dsh-client-store、dsh-client-ui-primitives；CSS Modules 转为哈希类映射 + 工厂执行时样式注入——哈希固定以字母 `m` 前缀开头，保证 `.mXXXXXX_*` 选择器合法，数字开头的十六进制哈希会被 CSSOM 整条丢弃导致界面无样式），因此 CSS、图标、行组件、菜单行为与内置版本天然一致。代价是后续 DSH 升级不会自动跟随上游视觉，需要时可从 `packages/client/ui-workspace/src/client/` 重新签到一次（保留插件改动：`addon/`、`locales.ts` 追加键、`contract/slots.ts` 注入面、`rows/Rows.tsx` 删除菜单项、`rows/WorkspaceBrowser.tsx` 分栏/聊天区、`tree.ts` excludedSessionIds、CSS 追加类）。宿主同为 TS 源码（`src/index.ts`）构建输出。
+- 客户端分叉不再携带旧的 `@deepseek-ai/dsh-client-ui-workspace` no-op shim：client-modules 的 bundle purity 门禁禁止跨插件 value import，其余行声明的 ui-workspace inject 边仅作到达元数据，分叉注册自己的同名模块即可。
 
-### 客户端：fork 补丁清单
+### 客户端：分叉改动清单
 
 1. **会话菜单加项**：`SessionNodeItem` 的 `sessionMenuItems` 数组追加 `{id:"delete", label: t("menu.deleteSession"), icon: IconTrashOutline16, danger: true}`；`onSelect` 增派 `delete`；组件新增 `onDelete` prop。
 2. **接线删除**：`FlatList`、`SessionTree` 透传 `onDelete`；`WorkspaceBrowser` 持有删除目标状态并渲染确认 Modal（复用内置"删除工作区"确认框的样式与红色按钮变体），确认后调用注入的 `deleteSession(sessionId)`，成功后**不刷新页面**（写墓碑 → `sessions.refresh()` → 重取聊天状态，见「一致性收尾」）。
@@ -65,10 +66,10 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 
 ### 客户端：数据与交互机制
 
-- **注入面扩展**：注册选项沿用内置的 `children`（`sidebar.workspaces.directoryFlow`）、`store`（`createWorkspaceViewStore`）、`locale: "workspace"`；`inject` 在保留全部内置动作（startSession/open/searchSessions/renameSession/forkSession/renameWorkspace/deleteWorkspace/insertWorkspaceBefore/archiveSession/insertSessionBefore/createWorkspace/hooks.directoryFlow）之外，追加：`deleteSession`、`chatSearch`、`hooks.chat`（`{root, folders}` 状态源，经 fetch 刷新）。
-- **新会话焦点路由（决策 2）**：`apply` 中包装 `ctx.workspaces.startSession`（dispose 时还原）。参数非空→原样透传；参数为空时读取包内运行时引用（当前会话 id + 聊天会话 id 集合，由浏览器渲染期维护）：当前会话是普通工作区会话→原样（内置"继承当前会话工作区"语义即满足"焦点在工作区"）；当前是聊天会话或无焦点→先 `ensure-date-folder` 拿到日期文件夹 workspaceId 再以它调用原实现；并发点击用 in-flight 标志去重，失败回退原实现。
+- **注入面扩展**：注册选项沿用内置的 `children`（`sidebar.workspaces.directoryFlow`）、`store`（`createWorkspaceViewStore`）、`locale: "workspace"`；`inject` 在保留全部内置动作（startSession/open/searchSessions/renameSession/forkSession/renameWorkspace/deleteWorkspace/insertWorkspaceBefore/archiveSession/insertSessionBefore/createWorkspace/hooks.directoryFlow）之外，追加：`deleteSession`、`chatSearch`、`startChat`、`hooks.chat`（`{root, folders, archived}` 状态源，经 fetch 刷新）。
+- **新会话焦点路由（决策 2）**：`UiWorkspaceService.installChatRouting` 包装 `ctx.uiWorkspace.startSession`（dispose 时还原；新版 Workspace 导航能力已从 `workspaces` 服务迁至 `uiWorkspace` 服务）。参数非空→原样透传；参数为空时读取包内运行时镜像（当前会话 id + 聊天会话 id 集合，由浏览器渲染期维护）：当前会话是普通工作区会话→原样（内置"继承当前会话工作区"语义即满足"焦点在工作区"）；当前是聊天会话或无焦点→先 `ensure-date-folder` 拿到日期文件夹 workspaceId，等客户端 workspace 流可见后再以它调用原实现；并发点击用 in-flight 标志去重，失败回退原实现。
 - **跨端调用（宿主↔浏览器 RPC）**：宿主经 `ctx.webServer.register` 注册 exact 路由，浏览器半直接 `fetch` 同源 `/api/chat-manager/*`（JSON）。路由契约：
-  - `GET /api/chat-manager/state` → `{ documentsRoot, dshRoot, folders: { [sessionId]: { slug, folder } }, archived: [{ sessionId, title, updatedAt }] }`
+  - `GET /api/chat-manager/state` → `{ documentsRoot, dshRoot, folders: { [sessionId]: { slug, folder } }, archived: [{ sessionId, title, workspaceTitle, updatedAt }] }`（`workspaceTitle` 由宿主按 `workspaceRegistry.list()` 账目解析，客户端免依赖槽位标准钩子）
   - `POST /api/chat-manager/ensure-date-folder` → `{ workspaceId, dateFolder }`（幂等；日期文件夹即"聊天工作区"，用 `workspaceRegistry.resolveByPath`/`create` 注册）
   - `POST /api/chat-manager/search-chats` `{ query }` → `{ items: [{ sessionId, title }] }`（仅聊天会话——cwd 在聊天根下、非归档、非 subagent；标题子串与宿主内容命中取**并集**）
   - `POST /api/chat-manager/delete-session` `{ sessionId }` → `{ ok: true }`
@@ -78,8 +79,8 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 ### 宿主端
 
 - **文件面**：宿主半是常规 Node 插件，直接使用 `node:fs/path/os` 与 `node:child_process`（不再走子进程脚本）。跨平台文档目录：Windows `powershell GetFolderPath('MyDocuments')`、Linux `xdg-user-dir DOCUMENTS`、macOS `~/Documents`，缓存结果。
-- **聊天文件夹登记**：每个日期文件夹内写 `.dsh-chat.json`（`{ [sessionId]: { slug, folder } }`），启动时扫描 `DSH` 根重建登记表；删除会话时清理对应条目，文件夹本身保留（决策 4）。
-- **首句 slug（决策 2/3）**：监听 `session/event`，命中"会话 cwd 位于 DSH 根下 + 首个用户消息 + 尚未登记"时，用 `llm.stream`（模型取 `agentDefaultModel.currentSelection()`）把第一句话生成 2–4 个英文小写单词的连字符 slug；失败（无模型/异常/超时）时用本地规则回退（取首句切词，去标点、小写、截断），保证目录一定生成；成功后 mkdir + 写 `.dsh-chat.json`。
+- **聊天文件夹登记**：每个日期文件夹内写 `.dsh-chat.json`（`{ "sessions": { [sessionId]: { slug, folder } } }`，带 `sessions` 包装以便将来扩展元数据；读侧对无包装的旧形状不兼容），启动时扫描 `DSH` 根重建登记表；删除会话时清理对应条目，文件夹本身保留（决策 4）。
+- **首句 slug（决策 2/3）**：监听 `session/event`，命中"会话 cwd 位于 DSH 根下 + 首个用户消息 + 尚未登记"时，用 `llm.stream`（模型取 `agentDefaultModel.currentSelection()`）把第一句话生成 2–4 个英文小写单词的连字符 slug；生成中按会话 id 做 in-flight 去重（该会话的后续用户消息在生成完成前不再触发；成功/失败/超时均清除），避免 15s LLM 窗口内的重复生成；失败（无模型/异常/超时）时用本地规则回退（取首句切词，去标点、小写、截断，与 LLM 结果共用同一 `cleanSlug` 收口：不足 2 词用固定 `session` 补齐、上限 4 词），保证 2–4 词范围且目录一定生成；目录名冲突时 `uniqueSlug` 的计数候选同样收在 2–4 词内（末词让位计数，如 `a-b-c-d` 冲突 → `a-b-c-2`）；成功后 mkdir + 写 `.dsh-chat.json`。
 - **代理指引**：`systemPrompt.section` 注册一节（order 150），告知代理：聊天会话的文件读写工作区是 `日期文件夹/slug/`，而非会话 cwd 本身。
 - **归档集合（决策 5）**：继续使用 workspace 存储域的 `archivedSessionIds`（全局状态），恢复 = 从集合摘除（保留账目位置，天然"回到原位"）；`/state` 路由每次实时读取该集合（无缓存，无需对账监听）。
 - **删除会话（决策 4 语义）**：宿主路由按序执行——① `sessionPersistence.locate(meta)` 定位日志工件并递归删除（空父目录一并清理）；② 对每个仍列出该 id 的工作区记录调用 `workspace.detachSession(id)`（注册表实体方法，正规记账，账目席位**移除**）；③ 清理 `.dsh-chat.json` 登记；④ **尽力清理平台投影缓存**：`storageDomain.get('session_projcache').table('sessions').delete(id)`（该缓存域无清理路径、行非权威且 identity 绑定，失败仅告警）；⑤ **最后**从归档集合摘除（经 `workspaceRegistry.setState` 的注册表写链，触发 `host/archived-sessions-changed` 帧）。聊天文件夹保留。**取消归档放在最后**：步骤①–②失败即整体 500；步骤③–④为尽力而为（失败仅告警）。任何失败都不会触碰归档集合，杜绝"删失败却回到工作区"。
@@ -88,8 +89,8 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 ### 设置页
 
 - 通过 `settings.section`（list，additive）注册 `id: "chat-archived"`、`order: 25`、label 跟随语言；页面内为每条归档会话提供「恢复」与「删除」（删除二次确认），操作成功后无需整页刷新（见一致性收尾）。
-- 展示格式为「工作区名：会话名」：工作区名由页面经槽位标准属性 `useWorkspaces` 在客户端按 `sessionIds` 账目查得（归档会话保留账目席位），无账目者仅显示会话名。
-- **相对时间显示（r8 修复）**：每条归档会话展示会话自身最近更新时间（来自 `/state` 的 `updatedAt`）的相对文案（刚刚 / N 分钟 / N 小时 / N 天 / N 个月 / N 年），经 `t("time.now")` / `` t(`time.${unit}`, {n}) `` 生成。键位于页面绑定命名空间 `chatManager`：locale 回退链（active → 该 NS zh → common → **原样返回键名**）意味着缺键会渲染字面量（此前出现 `time.days` / `time.minutes`），r8 为 chatManager 字典补齐 zh/en 各 7 个 `time.*` 键（文案与 workspace 字典同源）。
+- 展示格式为「工作区名：会话名」：工作区名由宿主 `/state` 按 `workspaceRegistry.list()` 的 `sessionIds` 账目解析后随行下发（归档会话保留账目席位），无账目者仅显示会话名。
+- **相对时间显示（r8 修复）**：每条归档会话展示会话自身最近更新时间（来自 `/state` 的 `updatedAt`）的相对文案（刚刚 / N 分钟 / N 小时 / N 天 / N 个月 / N 年），经 `t("time.now")` / `` t(`time.${unit}`, {n}) `` 生成。键位于页面绑定命名空间 `chatManager`：locale 回退链（active → 该 NS zh → common → **原样返回键名**）意味着缺键会渲染字面量（此前出现 `time.days` / `time.minutes`），r8 为 chatManager 字典补齐 zh/en 各 6 个 `time.*` 键（不含 `time.ago`；文案与 workspace 字典同源）。
 
 ### 客户端：区域布局与状态
 
@@ -105,7 +106,7 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 **测试缝（seam）**：
 - 主缝 = Web GUI 手工验收清单（与内置行为逐项对照）：工作区区域的全部既有操作（搜索/视图/添加/展开收起/点击打开/悬停/拖拽）在 fork 后必须与改造前逐一一致；新增项仅限会话菜单中的「删除会话」。
 - 次缝 = 宿主路由：重启后可用 `curl http://127.0.0.1:3080/api/chat-manager/state` 等直测响应 JSON；文件落盘用磁盘断言（日期文件夹、slug 子文件夹、`.dsh-chat.json`、日志工件移除、聊天文件夹保留）。
-- 真机缝 = headless Chrome（CDP）：`tools/cdp-metrics.mjs` 探布局、`tools/cdp-settings-probe.mjs` 探设置-已归档会话页（断言出现真实相对时间文案、页面文本无 `time.*` 键名泄漏）；两者共享 `tools/cdp-lib.mjs`（启动/连接/求值/清理——等 stderr 管道关闭后再删临时 profile，`%TEMP%\dsh-cdp-*` 残留必须为 0）。
+- 真机缝 = headless Chrome（CDP）：`.scratch/cdp-boot-probe.mjs` 探启动/双区域/console 错误、`.scratch/cdp-verify.mjs` 探设置-已归档会话页（断言出现真实相对时间文案、页面文本无 `time.*` 键名泄漏）与侧边栏布局；两者共享 `tools/cdp-lib.mjs`（启动/连接/求值/清理——等 stderr 管道关闭后再删临时 profile，`%TEMP%\dsh-cdp-*` 残留必须为 0）。
 
 **验收清单（按用户故事 2/4/5/11/21-24/27 编排）**：
 1. 新建聊天→发送第一句→磁盘出现 `文档/DSH/YYYY-MM-DD/xxxx/` 与 `.dsh-chat.json`；日期文件夹不出现在工作区。
@@ -115,7 +116,7 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 5. 三种焦点下的「新建会话」路由各自落点正确。
 6. 聊天区搜索命中仅聊天会话（标题与内容），聊天区列表按最新对话排序。
 7. zh/en 切换后新增文案完整。
-8. 设置-已归档会话页显示真实相对时间（刚刚 / 1天 / 23分钟…），无 `time.days` 类字面量键名（cdp-settings-probe 自动断言）。
+8. 设置-已归档会话页显示真实相对时间（刚刚 / 1天 / 23分钟…），无 `time.days` 类字面量键名（`.scratch/cdp-verify.mjs` 自动断言）。
 
 **Prior art**：本项目此前验证过的路径 —— 用户实测产生的 `D:\Documents\DSH\2026-08-15` 与空白会话（cwd 冻结为日期文件夹）证明宿主链路正确，可作为回归基线。
 

@@ -1,0 +1,73 @@
+diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\tree.ts" "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\tree.ts"
+index 37c6d50..14be00a 100644
+--- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\tree.ts"
++++ "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\tree.ts"
+@@ -20,6 +20,9 @@ import {
+ /** Group key for Sessions outside every Workspace. */
+ export const UNGROUPED_KEY = ''
+ 
++/** Shared immutable empty set for the optional exclusion parameter. */
++const EMPTY_IDS: ReadonlySet<SessionId> = new Set()
++
+ /**
+  * Resolve the Workspace browser group that owns one Session.
+  * @param workspaces - authoritative Workspace membership.
+@@ -208,6 +211,7 @@ function groupByWorkspace(
+   workspaces: readonly WorkspaceView[],
+   archived: ReadonlySet<SessionId>,
+   ungroupedOrder: readonly string[] | undefined,
++  excludedSessionIds: ReadonlySet<SessionId> = EMPTY_IDS,
+ ): Group[] {
+   const groups: Group[] = []
+   const accounted = new Set<SessionId>()
+@@ -217,6 +221,7 @@ function groupByWorkspace(
+       const summary = list.byId[id]
+       if (summary === undefined) continue // account may lead the list pull; the row appears when the summary lands
+       accounted.add(id)
++      if (excludedSessionIds.has(id)) continue
+       if (!sessionVisible(summary, list.current, archived)) continue
+       members.push(summary)
+     }
+@@ -228,7 +233,8 @@ function groupByWorkspace(
+   const stray = list.ids
+     .map(id => list.byId[id])
+     .filter((s): s is SessionSummary =>
+-      s !== undefined && !accounted.has(s.id) && sessionVisible(s, list.current, archived))
++      s !== undefined && !accounted.has(s.id) && !excludedSessionIds.has(s.id)
++      && sessionVisible(s, list.current, archived))
+   if (stray.length > 0) {
+     groups.push(buildGroup(
+       UNGROUPED_KEY,
+@@ -295,6 +301,7 @@ export function deriveGroups(
+   archivedSessionIds: readonly SessionId[],
+   pendingInteractions: SessionPendingInteractions,
+   view: TreeView,
++  excludedSessionIds: ReadonlySet<SessionId> = EMPTY_IDS,
+ ): GroupNode[] {
+   const archived = new Set(archivedSessionIds)
+   const expandedGroups = new Set(view.expandedGroups)
+@@ -303,7 +310,7 @@ export function deriveGroups(
+     ? undefined
+     : owningGroupKey(workspaces, list.current)
+   const groups: GroupNode[] = []
+-  for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder)) {
++  for (const g of groupByWorkspace(list, workspaces, archived, view.ungroupedOrder, excludedSessionIds)) {
+     const expanded = expandedGroups.has(g.key)
+     groups.push({
+       key: g.key,
+@@ -336,13 +343,14 @@ export function deriveFlat(
+   list: SessionListState,
+   archivedSessionIds: readonly SessionId[],
+   pendingInteractions: SessionPendingInteractions,
++  excludedSessionIds: ReadonlySet<SessionId> = EMPTY_IDS,
+ ): SessionNode[] {
+   const archived = new Set(archivedSessionIds)
+   const descendants = indexSubagentDescendants(list.byId)
+   const rows: SessionSummary[] = []
+   for (const id of list.ids) {
+     const s = list.byId[id]
+-    if (s === undefined || !sessionVisible(s, list.current, archived)) continue
++    if (s === undefined || excludedSessionIds.has(id) || !sessionVisible(s, list.current, archived)) continue
+     rows.push(s)
+   }
+   rows.sort(byRecency)
