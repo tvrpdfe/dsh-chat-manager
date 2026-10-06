@@ -1,0 +1,89 @@
+{
+  "name": "dsh-chat-manager",
+  "description": "Chat-session folders, chat area, session delete, and archived-session management for the DSH Web GUI and Desktop app (profile bundle plugin).",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-shortcuts",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4 <5"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs && node scripts/verify-bundle.mjs",
+    "typecheck": "tsc --noEmit",
+    "verify": "tsc --noEmit && node scripts/build.mjs && node scripts/verify-bundle.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5-alpha.1",
+    "@deepseek-ai/dsh-api-remotes": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-api-session-controller": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-api-workspace-controller": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-locale": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-product-analytics": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-shortcuts": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-store": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-ui-layout": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-ui-session": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-ui-sidebar": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-jobs": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-schedule": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-session": "^0.2.1-alpha.1",
+    "@deepseek-ai/dsh-util-workspace-path": "^0.2.1-alpha.1",
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.1",
+    "@types/react-dom": "^18.3.1",
+    "clsx": "^2.1.1",
+    "esbuild": "^0.24.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "typescript": "^5.7.0"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "src",
+    "scripts"
+  ],
+  "license": "MIT"
+}

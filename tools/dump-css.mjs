@@ -1,6 +1,10 @@
+// 用法：node tools/dump-css.mjs [client.js 路径]
+// 默认读取仓库根的 lib/client.js（按脚本自身位置解析，故在任意 cwd 下均可运行）；
+// 传入第一个命令行参数可覆盖该路径。
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const src = 'C:/Users/Administrator/.dsh/profiles/web/packages/dsh-chat-manager/lib/client.js';
+const src = process.argv[2] ?? fileURLToPath(new URL('../lib/client.js', import.meta.url));
 const s = fs.readFileSync(src, 'utf8');
 
 // Extract a JS double-quoted string starting at marker, honoring backslash escapes.

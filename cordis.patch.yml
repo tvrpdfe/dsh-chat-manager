@@ -1,0 +1,20 @@
+# dsh-chat-manager bundle patch: replace the shipped workspace browser with
+# the forked copy (same visuals, plus the chat section and 删除会话 in the
+# session menu) and mount the chat-manager host half.
+#
+# Declared via `dsh.bundle.patch` in package.json, so `dsh plugin add` /
+# `dsh plugin install` registers this package as a profile layer automatically
+# — users do not need to edit their profile's cordis.patch.yml.
+#
+# Layer order: profile bundles apply in `dsh.profile.bundles` order and this
+# package always sits after `@deepseek-ai/dsh-web-app`, so the `disabled: true`
+# override below reliably replaces the shipped ui-workspace row.
+# The browser bundle's rev is recomputed from artifact metadata at server
+# start, so a client change takes effect by rebuilding lib/client.js and
+# restarting dsh (plus a hard browser reload).
+- id: ui-workspace
+  disabled: true
+
+- insert:
+    - id: ui-chat-manager
+      name: dsh-chat-manager

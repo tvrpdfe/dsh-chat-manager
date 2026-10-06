@@ -1,24 +1,21 @@
-diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\navigation.ts" "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\navigation.ts"
-index a460afe..2141d49 100644
+diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\navigation.ts" "b/F:\\workdir\\dsh-chat-manager\\src\\client\\navigation.ts"
+index 61084b7..4711fc9 100644
 --- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\navigation.ts"
-+++ "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\navigation.ts"
-@@ -10,6 +10,7 @@ import type {
-   IWorkspaces, WorkspaceId, WorkspaceView,
++++ "b/F:\\workdir\\dsh-chat-manager\\src\\client\\navigation.ts"
+@@ -17,4 +17,5 @@ import type {
  } from '@deepseek-ai/dsh-api-workspace-controller/client'
  import type { SessionId } from '@deepseek-ai/dsh-session/types'
 +import { runChatFlow } from './addon/chat-runtime.ts'
- 
- /** Workspace archive and directory operations consumed by Client UI domains. */
- export interface UiWorkspace {
-@@ -67,6 +68,16 @@ export class DirectoryBrowseError extends Error {
-   }
+ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+ import type { DraftInitializationOptions } from '@deepseek-ai/dsh-client-ui-conversation/client'
+@@ -130,4 +131,14 @@ export class DirectoryBrowseError extends Error {
  }
  
 +/** Guard source consumed by the chat New-Session routing (plugin wiring). */
 +export interface ChatRoutingGuards {
-+  /** Current session id observed by the browser (undefined = no focus). */
++  /** Current Session id observed by the browser (undefined = no focus). */
 +  currentId: () => SessionId | undefined
-+  /** Chat session ids observed by the browser. */
++  /** Chat Session ids observed by the browser. */
 +  chatIds: () => ReadonlySet<SessionId>
 +  /** Open a new chat: ensure today's date-folder Workspace and start a Session in it. */
 +  startChat: () => Promise<void>
@@ -26,36 +23,32 @@ index a460afe..2141d49 100644
 +
  /** Implements Workspace archive and directory UI operations. */
  class UiWorkspaceService extends Service implements UiWorkspace {
-   private readonly connecting = new Map<WorkspaceId, Promise<SessionId>>()
-@@ -87,6 +98,31 @@ class UiWorkspaceService extends Service implements UiWorkspace {
-     ctx.effect(() => this.watchNavigation(), 'ui-workspace: Workspace navigation policy')
+@@ -168,4 +179,28 @@ class UiWorkspaceService extends Service implements UiWorkspace {
    }
  
 +  /**
 +   * Route a no-argument New Session to a new chat when the focus is a chat
-+   * session or there is no focus; an explicit Workspace target and a
++   * Session or there is no focus; an explicit Workspace target and a
 +   * workspace-focused current Session keep the shipped inheritance. The
-+   * wrapped method is restored by the returned disposer. The chat flow runs
-+   * under the shared in-flight gate and its failure falls back to the
-+   * pristine `startSession()` (the captured `original`), never back into
-+   * this wrapper.
-+   * @param guards - render-observed chat focus + chat flow opener.
++   * patched method is restored by the returned disposer. The chat flow runs
++   * under the shared in-flight gate and its failure falls back to the pristine
++   * `startSession()` (the captured `original`), never back into this wrapper.
++   * @param guards - render-observed chat focus plus the chat flow opener.
 +   * @returns the disposal function restoring the pristine method.
 +   */
 +  installChatRouting({ currentId, chatIds, startChat }: ChatRoutingGuards): () => void {
 +    const original = this.startSession.bind(this)
-+    const routed = (workspaceId?: WorkspaceId): void => {
-+      if (workspaceId !== undefined) return original(workspaceId)
++    const routed = (workspaceId?: WorkspaceId, options?: StartSessionOptions): void => {
++      if (workspaceId !== undefined) return original(workspaceId, options)
 +      const current = currentId()
-+      if (current !== undefined && !chatIds().has(current)) return original()
-+      runChatFlow(startChat, () => original())
++      if (current !== undefined && !chatIds().has(current)) return original(undefined, options)
++      runChatFlow(startChat, () => { original(undefined, options) })
 +    }
 +    this.startSession = routed
 +    return () => {
-+      if (this.startSession === routed) this.startSession = (workspaceId?: WorkspaceId) => original(workspaceId)
++      if (this.startSession === routed) this.startSession = original
 +    }
 +  }
 +
    async connectWorkspace(workspaceId: WorkspaceId): Promise<SessionId> {
      const workspace = this.workspaces.list.getSnapshot().items
-       .find(item => item.workspaceId === workspaceId)

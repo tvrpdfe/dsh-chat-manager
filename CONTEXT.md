@@ -33,7 +33,7 @@ DSH workspace 存储域全局状态中的会话 id 列表（持久化在 `~/.dsh
 _Avoid_: 归档列表、隐藏列表
 
 **删除会话**：
-移除会话日志工件（经 `sessionPersistence.locate` 删除磁盘日志与空父目录）、调用 `workspace.detachSession` 移除各工作区账目席位、摘除归档集合引用、清理聊天注册；聊天文件夹予以保留。取消归档置于最后，前置失败则不取消（杜绝删失败却回到工作区）。活跃会话的宿主内存态保留至进程重启，期间由客户端 localStorage 墓碑过滤器隐藏其行。
+移除会话的持久化目录（`sessionPersistence.list()`/`stat(id)` 拿到 snapshot —— id 与 cwd 在 `snapshot.header` 上；`locate(header)` 只给**当前格式**的文件名，而迁移过的会话目录里还留着旧世代文件，所以删除单位是会话目录 `<root>/<slug>/<session-id>` 整目录，删前先 `flush()` 落盘、删后复核存在性，拿不出工件则报错而非谎报成功）、调用 `workspace.detachSession` 移除各工作区账目席位、摘除归档集合引用、清理聊天注册；聊天文件夹予以保留。取消归档置于最后，前置失败则不取消（杜绝删失败却回到工作区）。活跃会话的宿主内存态保留至进程重启，期间由客户端 localStorage 墓碑过滤器隐藏其行。
 _Avoid_: 移除会话、清理会话
 
 **已归档会话栏目**：

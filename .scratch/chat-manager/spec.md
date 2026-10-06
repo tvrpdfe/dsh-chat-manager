@@ -54,15 +54,15 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 
 - 动态插件方案被废弃（自绘 UI 无法达到视觉/交互一致性，插件已被用户删除）。改为**固化进宿主组合的 bundle 插件**：插件包声明 `dsh.bundle`（随包分发 `cordis.patch.yml`：禁用内置 `ui-workspace` 行、插入 `ui-chat-manager`），`dsh plugin add/install` 自动把它注册进 profile 的 `dsh.profile.bundles` 层栈，用户无需编辑补丁层；宿主半 `lib/index.js` + 浏览器半 `lib/client.js` 经 profile 的 pnpm 依赖（`link:` 或 `workspace:*`）安装。
 - 浏览器半是内置 `@deepseek-ai/dsh-client-ui-workspace` 客户端源码的 **TS/TSX 分叉**（`src/client/` 从 DSH 源码检出拷贝，分叉改动见下），以 esbuild 构建为 `__ModuleLoader__.load` 工厂 bundle（仅 require 平台种子词：react/jsx-runtime、cordis、dsh-client-store、dsh-client-ui-primitives；CSS Modules 转为哈希类映射 + 工厂执行时样式注入——哈希固定以字母 `m` 前缀开头，保证 `.mXXXXXX_*` 选择器合法，数字开头的十六进制哈希会被 CSSOM 整条丢弃导致界面无样式），因此 CSS、图标、行组件、菜单行为与内置版本天然一致。代价是后续 DSH 升级不会自动跟随上游视觉，需要时可从 `packages/client/ui-workspace/src/client/` 重新签到一次（保留插件改动：`addon/`、`locales.ts` 追加键、`contract/slots.ts` 注入面、`rows/Rows.tsx` 删除菜单项、`rows/WorkspaceBrowser.tsx` 分栏/聊天区、`tree.ts` excludedSessionIds、CSS 追加类）。宿主同为 TS 源码（`src/index.ts`）构建输出。
-- 客户端分叉不再携带旧的 `@deepseek-ai/dsh-client-ui-workspace` no-op shim：client-modules 的 bundle purity 门禁禁止跨插件 value import，其余行声明的 ui-workspace inject 边仅作到达元数据，分叉注册自己的同名模块即可。
+- 0.2.x 已不再需要旧的 `@deepseek-ai/dsh-client-ui-workspace` no-op shim：客户端分叉自带 `contract/slots.ts` 与槽注册，不使用旧 shim；client-modules 的 bundle purity 门禁禁止跨插件 value import，其余行声明的 ui-workspace inject 边仅作到达元数据，分叉注册自己的同名模块即可。
 
 ### 客户端：分叉改动清单
 
-1. **会话菜单加项**：`SessionNodeItem` 的 `sessionMenuItems` 数组追加 `{id:"delete", label: t("menu.deleteSession"), icon: IconTrashOutline16, danger: true}`；`onSelect` 增派 `delete`；组件新增 `onDelete` prop。
-2. **接线删除**：`FlatList`、`SessionTree` 透传 `onDelete`；`WorkspaceBrowser` 持有删除目标状态并渲染确认 Modal（复用内置"删除工作区"确认框的样式与红色按钮变体），确认后调用注入的 `deleteSession(sessionId)`，成功后**不刷新页面**（写墓碑 → `sessions.refresh()` → 重取聊天状态，见「一致性收尾」）。
-3. **聊天区**：在 `WorkspaceBrowser` 根节点内、工作区列表下方渲染 `ChatSection`（仅 `wide` 状态）。复用 `sectionHeader`/`sectionLabel` CSS 与 `SessionNodeItem` 行组件；分区头含「聊天」标签、搜索框（防抖、本地标题过滤 + 宿主内容搜索）、「添加聊天」按钮（`IconPlusOutline16`）；列表 = cwd 位于聊天根目录下、未归档、非空白（或当前空白）的会话，按 `updatedAt` 降序。
-4. **工作区过滤**：`SessionTree` 的 `workspaces` 入参排除 cwd 位于聊天根目录下的工作区（日期文件夹）；`FlatList` 与 `SearchResults` 新增 `excludeIds`/过滤 prop，排除聊天会话。
-5. **文案**：`workspace` 命名空间字典（zh/en）追加删除、聊天区、聊天搜索等键。
+1. **会话菜单加项（槽条目化）**：删除项不再是 `Rows.tsx` 的硬编码改动，而是新增 `session-actions/DeleteSession.tsx` 并注册进 `sidebar.workspaces.session.menu.item`（`id: 'delete'`、`order: 500`、`danger`、`IconTrashOutlineRegular`）；`rows/Rows.tsx` 因此与上游 0.2.x 逐字节一致。
+2. **接线删除**：二次确认框注册进 `shell.overlay`（`SessionDeleteConfirmDialog`，请求/settle/in-flight 随请求生命周期，与菜单条目共享同一请求 store）；确认后走 `performSessionDelete`（宿主路由 → 写墓碑 → `sessions.refresh()` → 重取聊天状态，**不整页刷新**，见「一致性收尾」）。
+3. **聊天区**：`addon/ChatSection.tsx` 渲染在工作区分栏的相邻窗格（`WorkspaceBrowser` 的 `.split`/`.pane`/`.divider`，仅 `wide` 状态，分隔条可拖拽）。复用 `sectionHeader`/`sectionLabel` CSS 与 `SessionNodeItem` 行组件（含同一套槽驱动菜单）；分区头含「聊天」标签、搜索框（防抖、本地标题过滤 + 宿主内容搜索）、「新建聊天」按钮（`IconPlusOutlineRegular`）；列表 = cwd 位于聊天根目录下、未归档、非空白（或当前空白）的会话，按 `updatedAt` 降序。
+4. **工作区过滤**：`tree.ts` 的 `groupByWorkspace`/`deriveGroups`/`deriveFlat` 新增 `excludedSessionIds`（聊天会话 ∪ 删除墓碑），`WorkspaceBrowser` 把它透传给 `SessionTree`/`FlatList`/`SearchResults`；日期文件夹工作区由 `orderedWorkspaceAreaWorkspaces` 排除，`ungroupedMemberIds`/`flatMemberIds` 按同一集合过滤。
+5. **文案**：`workspace` 命名空间字典（zh/en）追加删除、聊天区、聊天搜索等键；设置页归档列表与其弹窗使用插件自有 `chatManager` 命名空间。
 
 ### 客户端：数据与交互机制
 
@@ -83,7 +83,7 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 - **首句 slug（决策 2/3）**：监听 `session/event`，命中"会话 cwd 位于 DSH 根下 + 首个用户消息 + 尚未登记"时，用 `llm.stream`（模型取 `agentDefaultModel.currentSelection()`）把第一句话生成 2–4 个英文小写单词的连字符 slug；生成中按会话 id 做 in-flight 去重（该会话的后续用户消息在生成完成前不再触发；成功/失败/超时均清除），避免 15s LLM 窗口内的重复生成；失败（无模型/异常/超时）时用本地规则回退（取首句切词，去标点、小写、截断，与 LLM 结果共用同一 `cleanSlug` 收口：不足 2 词用固定 `session` 补齐、上限 4 词），保证 2–4 词范围且目录一定生成；目录名冲突时 `uniqueSlug` 的计数候选同样收在 2–4 词内（末词让位计数，如 `a-b-c-d` 冲突 → `a-b-c-2`）；成功后 mkdir + 写 `.dsh-chat.json`。
 - **代理指引**：`systemPrompt.section` 注册一节（order 150），告知代理：聊天会话的文件读写工作区是 `日期文件夹/slug/`，而非会话 cwd 本身。
 - **归档集合（决策 5）**：继续使用 workspace 存储域的 `archivedSessionIds`（全局状态），恢复 = 从集合摘除（保留账目位置，天然"回到原位"）；`/state` 路由每次实时读取该集合（无缓存，无需对账监听）。
-- **删除会话（决策 4 语义）**：宿主路由按序执行——① `sessionPersistence.locate(meta)` 定位日志工件并递归删除（空父目录一并清理）；② 对每个仍列出该 id 的工作区记录调用 `workspace.detachSession(id)`（注册表实体方法，正规记账，账目席位**移除**）；③ 清理 `.dsh-chat.json` 登记；④ **尽力清理平台投影缓存**：`storageDomain.get('session_projcache').table('sessions').delete(id)`（该缓存域无清理路径、行非权威且 identity 绑定，失败仅告警）；⑤ **最后**从归档集合摘除（经 `workspaceRegistry.setState` 的注册表写链，触发 `host/archived-sessions-changed` 帧）。聊天文件夹保留。**取消归档放在最后**：步骤①–②失败即整体 500；步骤③–④为尽力而为（失败仅告警）。任何失败都不会触碰归档集合，杜绝"删失败却回到工作区"。
+- **删除会话（决策 4 语义）**：宿主路由按序执行——① 定位并删除持久化工件：`sessionPersistence.list()` 的条目是 snapshot，**id/cwd 在 `snapshot.header` 上**（`snapshot.id` 不存在，曾因此永远匹配不到、静默不删却回 200），未命中时再用公开 API `stat(id)` 复查；`locate(snapshot.header)` 给的是**当前格式**的文件名（`session.v4.jsonl.zstd`），而迁移过的会话目录里留的是旧世代（`session.jsonl.zstd` + `session.v3.jsonl.zstd`），所以持久化单位取**会话目录** `<root>/<slug>/<session-id>`（校验 `basename(dirname(artifact)) === sid` 后整目录递归删除；退化为删单文件时若目录里还剩兄弟世代即 500）；删除前**无条件**先 `flush()`（目录存在并不证明没有 pending 写入：活跃会话关机时的 flush 会把刚删掉的日志重建出来）；删后 `existsSync` 复核，删不掉即 500。只有 `list()` 与 `stat()` 都查不到该会话时才判定「平台不认识它」，此时仅清账目并回 200（另打一条告警）；「后端声称有存储会话却拿不出工件」一律 500 —— 绝不「告警 + 200」，因为客户端拿到 200 就会写墓碑隐藏该行、而日志仍在：界面与磁盘不一致，且墓碑因基线仍含该 id 永不清除；② 对每个仍列出该 id 的工作区记录调用 `workspace.detachSession(id)`（注册表实体方法，正规记账，账目席位**移除**）；③ 清理 `.dsh-chat.json` 登记；④ **尽力清理平台投影缓存**：`storageDomain.get('session_projcache').table('sessions').delete(id)`（该缓存域无清理路径、行非权威且 identity 绑定，失败仅告警）；⑤ **最后**从归档集合摘除（经 `workspaceRegistry.setState` 的注册表写链，触发 `host/archived-sessions-changed` 帧）。聊天文件夹保留。**取消归档放在最后**：步骤①–②失败即整体 500；步骤③–④为尽力而为（失败仅告警）。任何失败都不会触碰归档集合，杜绝"删失败却回到工作区"。
 - **归档列表标题（修复问题 4）**：`sessionQuery.readTitleSnapshots(ids)` 读取真实标题（含默认生成的会话名），缺失者回退标题占位；列表项展示标题与最近更新时间。
 
 ### 设置页
@@ -106,17 +106,17 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 **测试缝（seam）**：
 - 主缝 = Web GUI 手工验收清单（与内置行为逐项对照）：工作区区域的全部既有操作（搜索/视图/添加/展开收起/点击打开/悬停/拖拽）在 fork 后必须与改造前逐一一致；新增项仅限会话菜单中的「删除会话」。
 - 次缝 = 宿主路由：重启后可用 `curl http://127.0.0.1:3080/api/chat-manager/state` 等直测响应 JSON；文件落盘用磁盘断言（日期文件夹、slug 子文件夹、`.dsh-chat.json`、日志工件移除、聊天文件夹保留）。
-- 真机缝 = headless Chrome（CDP）：`.scratch/cdp-boot-probe.mjs` 探启动/双区域/console 错误、`.scratch/cdp-verify.mjs` 探设置-已归档会话页（断言出现真实相对时间文案、页面文本无 `time.*` 键名泄漏）与侧边栏布局；两者共享 `tools/cdp-lib.mjs`（启动/连接/求值/清理——等 stderr 管道关闭后再删临时 profile，`%TEMP%\dsh-cdp-*` 残留必须为 0）。
+- 真机缝 = headless Chrome（CDP），探针都在 `.scratch/`：`accept2-regress.mjs` 探启动（无失败页、双区域、零 console 错误、视图 store 无自馈重写）、`accept3-boot-chat.mjs` 探启动+双区域（工作区/聊天同时渲染、分栏与拖拽条）、`accept3-settings.mjs` 探设置-已归档会话页（真实相对时间文案、页面文本无 `time.*` 键名泄漏）、`accept3-routes.mjs` 探宿主路由（`/api/chat-manager/*` 在页面上下文 fetch）、`accept3-menu-pin-hover.mjs` 探行内动作与置顶/取消置顶；全部共享 `accept2-lib.mjs` → `tools/cdp-lib.mjs`（启动/连接/求值/清理——等 stderr 管道关闭后再删临时 profile，`%TEMP%\dsh-cdp-*` 残留必须为 0）。删除类断言见验收项 2/3 里点名的三个探针。
 
 **验收清单（按用户故事 2/4/5/11/21-24/27 编排）**：
 1. 新建聊天→发送第一句→磁盘出现 `文档/DSH/YYYY-MM-DD/xxxx/` 与 `.dsh-chat.json`；日期文件夹不出现在工作区。
-2. 工作区会话菜单含红色「删除会话」（垃圾桶图标），其余菜单项图标、顺序、悬停行为与改造前一致且不重复。
-3. 删除会话（工作区与聊天区各一次）：确认框出现→确认后行**立即消失且无整页刷新**、日志工件被移除、聊天文件夹仍在磁盘；**再手动刷新页面，行仍不出现**（墓碑过滤）。
+2. 工作区会话菜单含红色「删除会话」（垃圾桶图标），其余菜单项图标、顺序、悬停行为与改造前一致且不重复；**菜单对真实鼠标可用**：指针从「…」滑向列表的整个过程菜单保持锚定在触发按钮下方（不跳到视口左上角、不因 `closeOnPointerLeave` 提前关闭），可直接点中任一项（`.scratch/accept5-menu-mouse.mjs` 自动断言）。
+3. 删除会话（**行菜单**与设置页各一次）：确认框出现→确认后行**立即消失且无整页刷新**、**会话目标录被真正移除**、聊天文件夹仍在磁盘；**再手动刷新页面，行仍不出现**（墓碑过滤）；**重启宿主后仍不出现**（持久化 —— 行菜单路径 = `.scratch/accept7-row-menu-delete.mjs` + `accept7-phase2.mjs` 两阶段；设置页路径 = `accept6-delete-durable.mjs` + `accept6-phase2.mjs`）。
 4. 归档→设置页「已归档会话」显示该会话**真实标题**；恢复→回到原工作区位置；删除→归档列表与磁盘日志均消失。
 5. 三种焦点下的「新建会话」路由各自落点正确。
 6. 聊天区搜索命中仅聊天会话（标题与内容），聊天区列表按最新对话排序。
 7. zh/en 切换后新增文案完整。
-8. 设置-已归档会话页显示真实相对时间（刚刚 / 1天 / 23分钟…），无 `time.days` 类字面量键名（`.scratch/cdp-verify.mjs` 自动断言）。
+8. 设置-已归档会话页显示真实相对时间（刚刚 / 1天 / 23分钟…），无 `time.days` 类字面量键名（`.scratch/accept3-settings.mjs` 自动断言）。
 
 **Prior art**：本项目此前验证过的路径 —— 用户实测产生的 `D:\Documents\DSH\2026-08-15` 与空白会话（cwd 冻结为日期文件夹）证明宿主链路正确，可作为回归基线。
 
@@ -132,8 +132,9 @@ DSH Web 界面的左侧边栏把所有会话混在单一工作区浏览器里：
 ## Further Notes
 
 - **领域词汇**见 `CONTEXT.md`（工作区/工作区会话/聊天会话/聊天区/聊天文件夹/日期文件夹/归档集合/删除会话/已归档会话栏目）；**命名时序 ADR** 见 `docs/adr/0001-chat-folder-naming.md`。
-- 已知限制：活跃（attached）会话被删后，其宿主内存态会保留到进程重启（平台无公开销毁 API）；期间由客户端墓碑过滤器在所有聊天管理器列表隐藏该行，重启后基线不再列出、墓碑自动清除、删除真正完成；`.dsh-chat.json` 为自描述登记，损坏或缺失时扫描自动重建。
+- 已知限制：**空白会话的行内动作不可达** —— 上游 `Rows.tsx` 对 `blank` 行整条隐藏动作条（`{!row.blank && <span className={css.rowActions}>…}`），菜单触发按钮也在其中，所以「新建聊天」刚产生、尚未产生任何轮次的会话无法从其行菜单删除；此时可发送第一句使之非空白，或 `Ctrl+Alt+A` 归档后从设置页「已归档会话」删除（`accept6` 覆盖的正是这条路径）。这是内置行为，插件不改分叉。
+- 已知限制：活跃（attached）会话被删后，其宿主内存态会保留到进程重启（平台无公开销毁 API）；期间由客户端墓碑过滤器在所有聊天管理器列表隐藏该行，重启后基线不再列出、墓碑自动清除、删除真正完成；`.dsh-chat.json` 为自描述登记，损坏或缺失时扫描自动重建。**磁盘侧不再有此限制**：删除路由现在真的移除会话目录并复核（若工件被占用删不掉，则请求 500 而非谎报成功，客户端不写墓碑、行保持可见）。
 - 平台投影缓存 `~/.dsh/storages/session_projcache.json`（`session_projcache` 域）为每个会话写一次检查点、**本身无清理路径**，已删会话的行由删除路由第 ④ 步尽力清理；活跃会话在进程关闭时会被平台 detach 检查点写回一次（插件无法拦截），重启后不再产生。该缓存非权威、读取按 identity 绑定，残留行永不外显、不影响任何列表。
-- **DSH 源码参照**：`D:\Downloads\deepseek-harness` 为官方源码检出（用户提供），内置组件与服务行为以它为权威——组件树/CSS/菜单见 `packages/client/ui-workspace/src/client/`；平台 API 与不变量见 `session/session-persistence*/src`、`session/session-projection-cache/src`、`core/session/src`、`core/agent/src`、`host/apiproxy/src/api-proxy.ts`、`workspace/workspace/src`、`client/runtime/src/client/sessions/`。排查"平台是否支持某能力"（如按 id 销毁会话）先全文检索源码确认，不存在则采用约束内替代方案。
-- 组合层细节：禁用 `ui-workspace` 后，目录选择器包的引导图 inject 边仍指向该模块，浏览器 bundle 额外注册了一个同名空表面 shim 兜住该边；`ensure-date-folder` 的 workspaceId 在客户端有按路径匹配的兜底解析（兼容宿主进程未重启时的旧代码）。
+- **DSH 源码参照**：`F:\workdir\deepseek-harness` 为官方源码检出（用户提供），内置组件与服务行为以它为权威——组件树/CSS/菜单见 `packages/client/ui-workspace/src/client/`；平台 API 与不变量见 `session/session-persistence*/src`、`session/session-projection-cache/src`、`core/session/src`、`core/agent/src`、`host/apiproxy/src/api-proxy.ts`、`workspace/workspace/src`、`client/runtime/src/client/sessions/`。排查"平台是否支持某能力"（如按 id 销毁会话）先全文检索源码确认，不存在则采用约束内替代方案。
+- 组合层细节：禁用 `ui-workspace` 后，目录选择器包的引导图 inject 边仍指向该模块，但 0.2.x 已不再需要该 shim——客户端分叉自带 `contract/slots.ts` 与槽注册，不使用旧 shim；`ensure-date-folder` 的 workspaceId 在客户端有按路径匹配的兜底解析（兼容宿主进程未重启时的旧代码）。
 - 安装已按 AGENTS.md 取得用户确认；改动落在用户档案补丁层（`~/.dsh/profiles/web/`），不触碰发行版内置安装。

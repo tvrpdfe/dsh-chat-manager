@@ -1,8 +1,16 @@
 # dependencies
 node_modules/
 
-# scratch: generated artifacts only (spec.md is tracked; tooling lives in tools/)
+# scratch: generated artifacts only (spec.md and the acceptance probes are tracked;
+# tooling lives in tools/)
 .scratch/*.html
 .scratch/*.png
 .scratch/*.txt
+.scratch/*.log
+.scratch/*.err
 .scratch/client-r5.bak.js
+
+# local acceptance evidence: it quotes this machine's paths and session ids, so it
+# stays out of the published tree (the probes regenerate their own results)
+.scratch/accept-report.md
+.scratch/accept*.json

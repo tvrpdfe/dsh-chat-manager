@@ -1,194 +1,214 @@
-diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\index.ts" "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\index.ts"
-index 7c8e110..91a3f51 100644
+diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\index.ts" "b/F:\\workdir\\dsh-chat-manager\\src\\client\\index.ts"
+index cdf3214..d414a73 100644
 --- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\index.ts"
-+++ "b/F:\\workdir\\dsh-chat-manager\\packages\\dsh-chat-manager\\src\\client\\index.ts"
-@@ -1,18 +1,19 @@
- /**
-- * Workspace plugin, browser half. Two registrations: WorkspaceBrowser fills
-- * the sidebar shell's `sidebar.workspaces` hole (the whole browsing region),
-- * and WorkspacePicker fills the conversation hero's picker hole
-- * (`conversation.hero.workspace` — both hero forms). Both read real Host
-- * Workspaces through the global useWorkspaces hook, and each declares its
-- * own `single` directory-flow child hole for the composed picker package's
-- * client half (see the contract module doc). Export discipline:
-- * packages/client/AGENTS.md.
-+ * dsh-chat-manager, browser half. The workspace browsing region fork (same
-+ * visuals as the shipped workspace browser) plus the chat section, session
-+ * delete, and the archived-session settings page. Two registrations fill the
-+ * shipped `sidebar.workspaces` and `conversation.hero.workspace` holes; the
-+ * plugin adds the `chatManager` locale namespace and the settings section.
++++ "b/F:\\workdir\\dsh-chat-manager\\src\\client\\index.ts"
+@@ -15,4 +15,9 @@
+  * its relative time and its trailing status line. Export discipline:
+  * packages/client/AGENTS.md.
 + *
-+ * Export discipline: this entry IS the cordis plugin object; all module-table
-+ * requests stay inside the platform seed words, so `dsh.client.external` is
-+ * empty by design (the server-side bundle purity gate inlines everything else).
++ * dsh-chat-manager adds four things to the shipped wiring: the chat pane rides
++ * the browser registration, the delete-Session action joins the shipped row
++ * menu as its own entry, the no-argument New Session routes to a chat, and the
++ * archived-session settings page fills one `settings.section`.
   */
- import type { Context } from '@deepseek-ai/cordis'
- import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
+ import type {} from '@deepseek-ai/dsh-client-product-analytics/client'
+@@ -21,5 +26,5 @@ import type { RemoteHostFacts } from '@deepseek-ai/dsh-api-remotes/client'
  import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
--import type { IWorkspaces, WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client'
--import type { HostObservable, SnapshotSelectorHook } from '@deepseek-ai/dsh-client-ui-slots'
-+import type { IWorkspaces, WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
-+import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
- // Type-only: pulls the Controller service merges.
- import type {} from '@deepseek-ai/dsh-api-session-controller/client'
- import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
-@@ -20,6 +21,8 @@ import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
- import type {} from '@deepseek-ai/dsh-client-locale/client'
- // Type-only: pulls the SlotRegistry service merge (ctx.slots).
+ import type {
+-  IWorkspaces, SessionActivity, WorkspaceArchiveError, WorkspaceSnapshot,
++  IWorkspaces, SessionActivity, WorkspaceArchiveError, WorkspaceId, WorkspaceSnapshot,
+ } from '@deepseek-ai/dsh-api-workspace-controller/client'
+ import { createSnapshotStore } from '@deepseek-ai/dsh-client-store'
+@@ -34,9 +39,13 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
  import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 +// Type-only: pulls the Settings section slot merge (ctx.slots 'settings.section').
 +import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
  // Type-only: pulls the Session root standard-hook merge.
  import type {} from '@deepseek-ai/dsh-client-ui-session/client'
- import type { WorkspaceBrowserInjected, WorkspacePickerInjected } from './contract/slots.ts'
-@@ -28,27 +31,25 @@ import { createWorkspaceViewStore } from './stores.ts'
+ import {
+-  type ArchiveSessionInjected, type ForkSessionInjected, menuOpenStateFactory, type PinSessionInjected,
++  type ArchiveSessionInjected, type DeleteSessionInjected, type ForkSessionInjected, menuOpenStateFactory,
++  type PinSessionInjected,
+   type SessionArchiveConfirmInjected, type SessionArchiveConfirmRequest,
++  type SessionDeleteConfirmInjected, type SessionDeleteConfirmRequest,
+   type RenameSessionInjected, type RowToast, type RowToastInjected, type RowToastState, type SessionRenameDialogInjected,
+   type WorkspaceBrowserInjected, type WorkspacePickerInjected,
+@@ -47,4 +56,5 @@ import { createWorkspaceViewStore } from './stores.ts'
  import { WorkspaceBrowser } from './rows/WorkspaceBrowser.tsx'
+ import { ArchiveSessionMenuItem, ArchiveSessionRowButton, SessionArchiveConfirmDialog } from './session-actions/ArchiveSession.tsx'
++import { DeleteSessionMenuItem, SessionDeleteConfirmDialog } from './session-actions/DeleteSession.tsx'
+ import { derive } from './session-actions/derived.ts'
+ import { ForkSessionMenuItem } from './session-actions/ForkSession.tsx'
+@@ -53,4 +63,12 @@ import { RenameSessionMenuItem, SessionRenameDialog } from './session-actions/Re
+ import { RowActionToast } from './session-actions/RowActionToast.tsx'
  import { WorkspacePicker } from './WorkspacePicker.tsx'
- import { en, zh, type WorkspaceKey } from './locales.ts'
--
--export type { UiWorkspace } from './navigation.ts'
--export type {
--  DirectoryFlowOwnerProps, DirectoryFlowSlotName, DirectoryPickingHooks, DirectoryPickingInjected,
--  WorkspaceBrowserInjected, WorkspaceBrowserProps, WorkspacePickerInjected, WorkspacePickerProps,
--} from './contract/slots.ts'
--export type { WorkspaceKey } from './locales.ts'
 +import { ArchivedSessionsPage } from './addon/ArchivedSessionsPage.tsx'
 +import {
-+  chatManagerEn, chatManagerZh, chatRuntimeSource, chatStateSource,
++  chatManagerEn, chatManagerZh, chatRuntimeSource, chatStateSource, performSessionDelete,
 +  refreshChatState, rpcPost, setRefreshSessions,
 +} from './addon/chat-runtime.ts'
 +import type { ChatManagerKey } from './addon/chat-runtime.ts'
 +import { samePath } from '../shared/paths.ts'
 +import type { ChatSearchHit } from '../shared/chat.ts'
+ import { en, zh, type WorkspaceKey } from './locales.ts'
  
- declare module '@deepseek-ai/dsh-client-ui-slots' {
--  interface GlobalStandardProps {
--    /** Selector hook over the pure Workspace Controller snapshot. */
--    useWorkspaces: SnapshotSelectorHook<WorkspaceSnapshot>
--  }
--
-   interface LocaleNamespaceMap {
+@@ -74,4 +92,6 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
      /** The workspace browsing region and pick/create flow copy. */
      workspace: WorkspaceKey
 +    /** The archived-session settings page copy. */
 +    chatManager: ChatManagerKey
    }
  }
- 
--/** Dictionary namespace owned by this plugin. */
-+/** Dictionary namespace owned by this plugin (shipped workspace copy). */
+@@ -86,4 +106,7 @@ declare module '@deepseek-ai/dsh-api-session-controller/client' {
  const NS = 'workspace'
  
++/** Plugin-owned dictionary namespace (archived-session page and its dialogs). */
++const CHAT_NS = 'chatManager'
++
  /**
-@@ -65,8 +66,9 @@ export const inject = [
- 
- /**
-  * Register the browser and picker once their slot declarations are on the
-- * ledger. Inject factories return plain callbacks; data reads use the
-- * framework's global hooks.
-+ * ledger; the chat section rides the browser registration, and the archived
-+ * settings page fills the settings section. Inject factories return plain
-+ * callbacks; data reads use the framework's global hooks.
-  * @param ctx - client root context.
-  */
- export function apply(ctx: Context): void {
-@@ -74,8 +76,11 @@ export function apply(ctx: Context): void {
-   const workspaces = ctx.get('workspaces') as IWorkspaces
-   const uiWorkspace = new UiWorkspaceService(
-     ctx, ctx.remote.directoryPicker, workspaces, sessions)
+  * Required services (cordis fiber inject). The target slots are declared by
+@@ -119,6 +142,14 @@ export function apply(ctx: Context): void {
+     ctx, ctx.remote.directoryPicker, workspaces, sessions, viewInstance.actions, notify,
+   )
 -  ctx.slots.provideRoot({ hooks: { workspaces: workspaces.list } })
 +  ctx.slots.provideRoot({ hooks: { workspaces: workspaces.list, chat: chatStateSource } })
    ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-workspace: dictionaries')
-+  ctx.effect(() => ctx.locale.register('chatManager', { zh: chatManagerZh, en: chatManagerEn }), 'dsh-chat-manager: dictionaries')
++  ctx.effect(
++    () => ctx.locale.register(CHAT_NS, { zh: chatManagerZh, en: chatManagerEn }),
++    'dsh-chat-manager: dictionaries',
++  )
++  // The delete and restore choreography repulls the Session baseline, and the
++  // archived page plus the chat pane read the plugin's own chat state.
 +  setRefreshSessions(() => { void sessions.refresh() })
 +  void refreshChatState().catch(() => {})
+   const shortcutControls = createWorkspaceShortcutControls()
  
-   const searchSessions: WorkspaceBrowserInjected['searchSessions'] = async (query, signal) => {
-     const result = await sessions.search(query, signal)
-@@ -95,9 +100,49 @@ export function apply(ctx: Context): void {
-     subscribe: listener => ctx.on('connection/reset', listener),
-   }
-   const pickerFlowSource = flowSource('conversation.hero.workspace.directoryFlow')
-+
+@@ -229,4 +260,36 @@ export function apply(ctx: Context): void {
+     showArchived: () => { viewInstance.actions.setArchivedFilter('show') },
+   })
 +  // ---- dsh-chat-manager RPC helpers ----
-+  const deleteSessionRpc = (sessionId: string): Promise<void> =>
-+    rpcPost('/api/chat-manager/delete-session', { sessionId }).then(() => undefined)
 +  const chatSearchRpc = (query: string): Promise<ChatSearchHit[]> =>
 +    rpcPost('/api/chat-manager/search-chats', { query }).then((data) =>
 +      (data as { items?: ChatSearchHit[] }).items ?? [])
-+  const resolveChatWorkspaceId = async (dateFolder: string): Promise<string> => {
-+    for (let attempt = 0; attempt < 12; attempt += 1) {
-+      const found = (chatRuntimeSource.getSnapshot().workspaces ?? []).find(workspace =>
-+        workspace.path === dateFolder || samePath(workspace.path, dateFolder))
-+      if (found !== undefined && typeof found.workspaceId === 'string' && found.workspaceId.length > 0) {
-+        return found.workspaceId
-+      }
-+      await new Promise<void>(resolve => { window.setTimeout(resolve, 250) })
++  /** The date-folder Workspace the Host registered, as the client observed it. */
++  const waitForChatWorkspace = (dateFolder: string): Promise<string | undefined> =>
++    waitFor(() => {
++      const found = chatRuntimeSource.getSnapshot().workspaces
++        .find(workspace => workspace.path === dateFolder || samePath(workspace.path, dateFolder))
++      return found === undefined || found.workspaceId.length === 0 ? undefined : found.workspaceId
++    }, 12)
++  /** A Host registry write leads the client stream; the start needs the local snapshot. */
++  const waitForRegisteredWorkspace = (workspaceId: string): Promise<string | undefined> =>
++    waitFor(() => workspaces.list.getSnapshot().items
++      .some(item => item.workspaceId === workspaceId) ? workspaceId : undefined, 24)
++  const startChatRpc = async (): Promise<void> => {
++    const data = await rpcPost('/api/chat-manager/ensure-date-folder', {})
++    const payload = data as { dateFolder?: unknown; workspaceId?: unknown }
++    const declared = typeof payload.workspaceId === 'string' && payload.workspaceId.length > 0
++      ? payload.workspaceId
++      : undefined
++    const resolved = declared ?? (typeof payload.dateFolder === 'string'
++      ? await waitForChatWorkspace(payload.dateFolder)
++      : undefined)
++    if (resolved === undefined) throw new Error('chat-manager: the date-folder Workspace is unknown')
++    if (await waitForRegisteredWorkspace(resolved) === undefined) {
++      throw new Error('chat-manager: the date-folder Workspace did not reach the client')
 +    }
-+    return ''
++    uiWorkspace.startSession(resolved as WorkspaceId)
++    void refreshChatState().catch(() => {})
 +  }
-+  const startChatRpc = (): Promise<void> =>
-+    rpcPost('/api/chat-manager/ensure-date-folder', {}).then(async (data) => {
-+      const payload = data as { dateFolder?: unknown; workspaceId?: unknown }
-+      const dateFolder = typeof payload.dateFolder === 'string' ? payload.dateFolder : ''
-+      let workspaceId = typeof payload.workspaceId === 'string' && payload.workspaceId.length > 0
-+        ? payload.workspaceId
-+        : ''
-+      if (workspaceId === '' && dateFolder !== '') workspaceId = await resolveChatWorkspaceId(dateFolder)
-+      if (workspaceId === '') throw new Error('missing workspace id')
-+      // The fresh date-folder Workspace may not have reached the client
-+      // stream yet (Host registry written, feed sync in flight); the session
-+      // start needs the local snapshot, so wait for it before opening.
-+      for (let attempt = 0; attempt < 24; attempt += 1) {
-+        const snapshot = workspaces.list.getSnapshot()
-+        if (snapshot.items.some(w => w.workspaceId === workspaceId)) break
-+        await new Promise<void>(resolve => { window.setTimeout(resolve, 250) })
-+      }
-+      uiWorkspace.startSession(workspaceId as WorkspaceId)
-+      void refreshChatState().catch(() => {})
-+    })
 +
    const browserInjected = (): WorkspaceBrowserInjected => ({
      // Explicit group actions keep their target; unscoped New Session inherits
--    // the current Session Workspace before the recent-Workspace fallback.
-+    // the current Session Workspace before the recent-Workspace fallback
-+    // (the plugin routes the no-arg case to a new chat first — see below).
-     startSession: (workspaceId) => { uiWorkspace.startSession(workspaceId) },
-     open: (sessionId) => { sessions.open(sessionId) },
-     searchSessions,
-@@ -127,7 +172,10 @@ export function apply(ctx: Context): void {
-       await workspaces.insertSessionBefore(workspaceId, sessionId, beforeSessionId)
-     },
-     createWorkspace: input => workspaces.create(input),
--    hooks: { directoryFlow: browserFlowSource, hostInfo },
-+    deleteSession: deleteSessionRpc,
+@@ -250,5 +313,13 @@ export function apply(ctx: Context): void {
+     setDirectoryBusy: shortcutControls.directoryBusy,
+     dismissForkError: shortcutControls.dismissForkError,
+-    hooks: { directoryFlow: browserFlowSource, hostInfo, workspaceShortcuts: shortcutControls.state, shortcuts: ctx.shortcuts.catalog },
 +    chatSearch: chatSearchRpc,
 +    startChat: startChatRpc,
-+    hooks: { directoryFlow: browserFlowSource, hostInfo, chat: chatStateSource },
++    hooks: {
++      directoryFlow: browserFlowSource,
++      hostInfo,
++      workspaceShortcuts: shortcutControls.state,
++      shortcuts: ctx.shortcuts.catalog,
++      chat: chatStateSource,
++    },
    })
    const pickerInjected = (): WorkspacePickerInjected => ({
-     createWorkspace: input => workspaces.create(input),
-@@ -154,4 +202,23 @@ export function apply(ctx: Context): void {
-     },
+@@ -256,4 +327,18 @@ export function apply(ctx: Context): void {
+     hooks: { directoryFlow: pickerFlowSource },
+   })
++  // Plugin action: the delete confirmation. One request store is shared by the
++  // row entry that raises it and the overlay dialog that answers it, so the
++  // dialog outlives the row menu the action sat in.
++  const deleteRequest = createSnapshotStore<SessionDeleteConfirmRequest | null>(null)
++  const deleteInjected = (): DeleteSessionInjected => ({
++    requestSessionDelete: (sessionId, displayTitle) => { deleteRequest.set({ sessionId, displayTitle }) },
++  })
++  const deleteConfirmInjected = (): SessionDeleteConfirmInjected => ({
++    hooks: { deleteRequest },
++    settleSessionDelete: () => { deleteRequest.set(null) },
++    // The tombstone plus baseline refresh live in the shared choreography, so a
++    // delete from the settings page leaves every list in the same state.
++    deleteSession: performSessionDelete,
++  })
+   // Each registration declares its owned children in the same call; slot
+   // injection follows both the owner and declaration HMR lifetimes.
+@@ -288,4 +373,5 @@ export function apply(ctx: Context): void {
+     yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'fork', order: 300, locale: NS, inject: forkInjected }, ForkSessionMenuItem)
+     yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'archive', order: 400, locale: NS, inject: archiveInjected }, ArchiveSessionMenuItem)
++    yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'delete', order: 500, locale: NS, inject: deleteInjected }, DeleteSessionMenuItem)
+   })
+   ctx.slots.inject('sidebar.workspaces.session.row.action', function* () {
+@@ -307,4 +393,7 @@ export function apply(ctx: Context): void {
+       name: 'shell.overlay', id: 'workspace.row-toast', locale: NS, store: viewStore, inject: rowToastInjected,
+     }, RowActionToast)
++    yield ctx.slots.register({
++      name: 'shell.overlay', id: 'workspace.session-delete', locale: NS, inject: deleteConfirmInjected,
++    }, SessionDeleteConfirmDialog)
+   })
+   ctx.slots.inject('conversation.hero.workspace', () => ctx.slots.register(
+@@ -317,4 +406,20 @@ export function apply(ctx: Context): void {
      WorkspacePicker,
    ))
-+  // New-session routing: a workspace-focused session keeps the shipped
-+  // inheritance; a chat-focused session or no focus opens a new chat. The
-+  // patching and its restore live in the UiWorkspaceService wrapper (the
-+  // only component that legitimately owns ctx.uiWorkspace); the in-flight
-+  // gate is shared with the chat-header 新建聊天 button.
++  // New Session routing: a workspace-focused Session keeps the shipped
++  // inheritance, while a chat-focused Session or no focus opens a new chat. The
++  // in-flight gate is shared with the chat pane's add-chat button.
 +  ctx.effect(() => uiWorkspace.installChatRouting({
 +    currentId: () => chatRuntimeSource.getSnapshot().currentId,
 +    chatIds: () => chatRuntimeSource.getSnapshot().chatIds,
 +    startChat: startChatRpc,
 +  }), 'dsh-chat-manager: startSession routing')
-+
 +  ctx.slots.inject('settings.section', () => ctx.slots.register({
 +    name: 'settings.section',
 +    id: 'chat-archived',
 +    order: 25,
-+    label: () => ctx.locale.bind('chatManager')('settings.archived'),
-+    locale: 'chatManager',
++    label: () => ctx.locale.bind(CHAT_NS)('settings.archived'),
++    locale: CHAT_NS,
 +    inject: () => ({}),
 +  }, ArchivedSessionsPage))
  }
+ 
+@@ -329,2 +434,21 @@ function activeSessionRefusal(reason: unknown): readonly SessionActivity[] | und
+   return rpcError.code === 'workspace/session-active' ? rpcError.details.activity : undefined
+ }
++
++/**
++ * Poll one synchronous probe until it answers or the attempt budget runs out.
++ * The chat routes cross two asynchronous boundaries (the Host registry write
++ * and the client stream that mirrors it), so the opener waits on observed state
++ * rather than on a fixed delay.
++ * @param probe - returns the resolved value, or undefined while it is not ready.
++ * @param attempts - maximum probes before giving up.
++ * @param intervalMs - pause between probes.
++ * @returns the first resolved value, or undefined when the budget ran out.
++ */
++async function waitFor<T>(probe: () => T | undefined, attempts: number, intervalMs = 250): Promise<T | undefined> {
++  for (let attempt = 0; attempt < attempts; attempt += 1) {
++    const value = probe()
++    if (value !== undefined) return value
++    await new Promise<void>(resolve => { window.setTimeout(resolve, intervalMs) })
++  }
++  return undefined
++}
