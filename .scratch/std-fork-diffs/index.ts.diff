@@ -1,5 +1,5 @@
 diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\index.ts" "b/F:\\workdir\\dsh-chat-manager\\src\\client\\index.ts"
-index cdf3214..d414a73 100644
+index cdf3214..b96e2a7 100644
 --- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\index.ts"
 +++ "b/F:\\workdir\\dsh-chat-manager\\src\\client\\index.ts"
 @@ -15,4 +15,9 @@
@@ -84,7 +84,7 @@ index cdf3214..d414a73 100644
 +  void refreshChatState().catch(() => {})
    const shortcutControls = createWorkspaceShortcutControls()
  
-@@ -229,4 +260,36 @@ export function apply(ctx: Context): void {
+@@ -229,4 +260,51 @@ export function apply(ctx: Context): void {
      showArchived: () => { viewInstance.actions.setArchivedFilter('show') },
    })
 +  // ---- dsh-chat-manager RPC helpers ----
@@ -104,7 +104,22 @@ index cdf3214..d414a73 100644
 +      .some(item => item.workspaceId === workspaceId) ? workspaceId : undefined, 24)
 +  const startChatRpc = async (): Promise<void> => {
 +    const data = await rpcPost('/api/chat-manager/ensure-date-folder', {})
-+    const payload = data as { dateFolder?: unknown; workspaceId?: unknown }
++    const payload = data as {
++      dateFolder?: unknown
++      workspaceId?: unknown
++      /** Host fact: whether the chat folder was made provisionable for the sandbox. */
++      folderAccess?: { ok?: unknown; detail?: unknown } | null
++    }
++    // The chat still starts when the folder was not made provisionable, so this
++    // is a diagnostic rather than a failure: the Host already logged the detail,
++    // and the user-visible symptom (if the sandbox needs the folder) arrives
++    // later as a Windows permission error on the first tool call.
++    if (payload.folderAccess != null && payload.folderAccess.ok === false) {
++      console.warn(
++        'dsh-chat-manager: the chat folder could not be made provisionable for the DSH file sandbox'
++        + (typeof payload.folderAccess.detail === 'string' ? `: ${payload.folderAccess.detail}` : ''),
++      )
++    }
 +    const declared = typeof payload.workspaceId === 'string' && payload.workspaceId.length > 0
 +      ? payload.workspaceId
 +      : undefined
@@ -121,7 +136,7 @@ index cdf3214..d414a73 100644
 +
    const browserInjected = (): WorkspaceBrowserInjected => ({
      // Explicit group actions keep their target; unscoped New Session inherits
-@@ -250,5 +313,13 @@ export function apply(ctx: Context): void {
+@@ -250,5 +328,13 @@ export function apply(ctx: Context): void {
      setDirectoryBusy: shortcutControls.directoryBusy,
      dismissForkError: shortcutControls.dismissForkError,
 -    hooks: { directoryFlow: browserFlowSource, hostInfo, workspaceShortcuts: shortcutControls.state, shortcuts: ctx.shortcuts.catalog },
@@ -136,7 +151,7 @@ index cdf3214..d414a73 100644
 +    },
    })
    const pickerInjected = (): WorkspacePickerInjected => ({
-@@ -256,4 +327,18 @@ export function apply(ctx: Context): void {
+@@ -256,4 +342,18 @@ export function apply(ctx: Context): void {
      hooks: { directoryFlow: pickerFlowSource },
    })
 +  // Plugin action: the delete confirmation. One request store is shared by the
@@ -155,13 +170,13 @@ index cdf3214..d414a73 100644
 +  })
    // Each registration declares its owned children in the same call; slot
    // injection follows both the owner and declaration HMR lifetimes.
-@@ -288,4 +373,5 @@ export function apply(ctx: Context): void {
+@@ -288,4 +388,5 @@ export function apply(ctx: Context): void {
      yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'fork', order: 300, locale: NS, inject: forkInjected }, ForkSessionMenuItem)
      yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'archive', order: 400, locale: NS, inject: archiveInjected }, ArchiveSessionMenuItem)
 +    yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'delete', order: 500, locale: NS, inject: deleteInjected }, DeleteSessionMenuItem)
    })
    ctx.slots.inject('sidebar.workspaces.session.row.action', function* () {
-@@ -307,4 +393,7 @@ export function apply(ctx: Context): void {
+@@ -307,4 +408,7 @@ export function apply(ctx: Context): void {
        name: 'shell.overlay', id: 'workspace.row-toast', locale: NS, store: viewStore, inject: rowToastInjected,
      }, RowActionToast)
 +    yield ctx.slots.register({
@@ -169,7 +184,7 @@ index cdf3214..d414a73 100644
 +    }, SessionDeleteConfirmDialog)
    })
    ctx.slots.inject('conversation.hero.workspace', () => ctx.slots.register(
-@@ -317,4 +406,20 @@ export function apply(ctx: Context): void {
+@@ -317,4 +421,20 @@ export function apply(ctx: Context): void {
      WorkspacePicker,
    ))
 +  // New Session routing: a workspace-focused Session keeps the shipped
@@ -190,7 +205,7 @@ index cdf3214..d414a73 100644
 +  }, ArchivedSessionsPage))
  }
  
-@@ -329,2 +434,21 @@ function activeSessionRefusal(reason: unknown): readonly SessionActivity[] | und
+@@ -329,2 +449,21 @@ function activeSessionRefusal(reason: unknown): readonly SessionActivity[] | und
    return rpcError.code === 'workspace/session-active' ? rpcError.details.activity : undefined
  }
 +

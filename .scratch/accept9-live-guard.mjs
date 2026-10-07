@@ -75,6 +75,22 @@ const startedAt = Date.now();
 
 try {
   await app.navigate();
+  // The fixture is "the chat pane's current blank row", and DSH shows a blank row
+  // only for the CURRENT Session: a Host whose current session is a titled chat
+  // renders no blank row at all. Ask the chat pane for a new chat in that case
+  // (the same button the user clicks) instead of waiting for one that never comes.
+  const clickNewChat = async () => {
+    const target = await app.evaluate(`(() => {
+      const chat = document.querySelector('[class$=_chatSection]');
+      if (chat === null) return null;
+      const b = [...chat.querySelectorAll('button')].find(x => (x.getAttribute('aria-label') || '').includes('新建聊天'));
+      if (b === undefined) return null;
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+    })()`).catch(() => null);
+    if (target !== null) await app.mouseClick(target.x, target.y);
+    return target !== null;
+  };
   let pane = null;
   for (let i = 0; i < 90 && pane === null; i += 1) {
     await sleep(2000);
@@ -86,6 +102,10 @@ try {
       return { blankId: blank === undefined ? null : blank.getAttribute('data-row-key').slice(8) };
     })()`).catch(() => null);
     if (state !== null && state.blankId !== null) pane = state;
+    else if (i === 3 || i === 15 || i === 40) {
+      const asked = await clickNewChat();
+      if (asked) console.log(`no blank row rendered; asked the chat pane for a new chat (attempt ${i})`);
+    }
   }
   check('0 the chat pane offers its current blank row', pane !== null, JSON.stringify(pane));
   if (pane === null) throw new Error('no blank chat row ever rendered');

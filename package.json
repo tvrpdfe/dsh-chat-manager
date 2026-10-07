@@ -47,7 +47,8 @@
   "scripts": {
     "build": "node scripts/build.mjs && node scripts/verify-bundle.mjs",
     "typecheck": "tsc --noEmit",
-    "verify": "tsc --noEmit && node scripts/build.mjs && node scripts/verify-bundle.mjs"
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "verify": "tsc --noEmit && node scripts/build.mjs && node scripts/verify-bundle.mjs && node --test \"test/**/*.test.mjs\""
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.5-alpha.1",
@@ -83,7 +84,8 @@
     "lib",
     "cordis.patch.yml",
     "src",
-    "scripts"
+    "scripts",
+    "test"
   ],
   "license": "MIT"
 }

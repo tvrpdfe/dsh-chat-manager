@@ -17,9 +17,22 @@ import { spawnSync } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isUnderChatRoot, normalizePathLower } from './shared/paths.ts'
 import { collisionSlug, cleanSlug } from './shared/slug.ts'
+import { planSessionArtifactRemoval } from './shared/removal-plan.ts'
+import { ensureWindowsFolderAccess } from './win-folder-access.ts'
 import type { ArchivedChatRow, ChatFolderEntry, ChatSearchHit } from './shared/chat.ts'
 
 const name = 'dsh-chat-manager'
+
+/**
+ * 500 text for the POSIX-only delete refusal: the session's lease is a
+ * `flock` on `<sessionDir>/session.lock`, and that file is inside the very
+ * directory the delete must remove to stop a live write handle from
+ * recreating the log. Windows holds a path-derived kernel semaphore instead,
+ * so the same delete is safe there and never reaches this text.
+ */
+export const POSIX_LIVE_DELETE_REFUSAL = 'the Host still holds this session live and its POSIX write lease'
+  + ' (session.lock) lives in the session directory, so removing it would forfeit cross-process write'
+  + ' exclusion: restart the Host and retry.'
 
 /** One-line message for an unknown failure (Error instance or anything else). */
 function errorMessage(err: unknown): string {
@@ -38,6 +51,23 @@ const inject = [
 ]
 
 const CHAT_ROOT_NAME = 'DSH'
+
+/**
+ * Environment variable naming the chat root outright. Supported, not a test
+ * hook only: it is the escape hatch for a Documents folder the platform cannot
+ * report (headless Linux), for putting the chat area on another volume, and for
+ * a verification Host whose chat folders must stay off the real tree.
+ */
+const CHAT_ROOT_OVERRIDE_ENV = 'DSH_CHAT_MANAGER_ROOT'
+
+/**
+ * Wall-clock budget for the startup sweep that makes existing date folders
+ * provisionable (`ensureWindowsFolderAccess` caps each `icacls` call on its
+ * own). The sweep runs synchronously on the startup path, so a dead or very
+ * slow volume must stop it rather than hold the Host's start indefinitely; a
+ * skipped folder is healed later by the chat route when that day is used.
+ */
+const CHAT_FOLDER_SWEEP_BUDGET_MS = 30_000
 
 /** Workspace-item shape read from the registry (leaf fields only). */
 interface WorkspaceView {
@@ -145,6 +175,24 @@ function apply(ctx: HostCtx): void {
   /** Session ids whose slug generation is in flight (first-message dedup). */
   const pendingSlugFor = new Set<string>()
 
+  /**
+   * The chat root named by {@link CHAT_ROOT_OVERRIDE_ENV}, or null when the
+   * environment names none. A relative value is refused with a warning rather
+   * than resolved against the Host's working directory — a bare join would
+   * scatter chat folders wherever the Host happened to start.
+   * @returns the absolute chat root, or null to fall back to the platform Documents folder.
+   */
+  function chatRootOverride(): string | null {
+    const raw = process.env[CHAT_ROOT_OVERRIDE_ENV]
+    if (raw === undefined || raw.trim() === '') return null
+    const value = raw.trim()
+    if (!path.isAbsolute(value)) {
+      console.warn(`[dsh-chat-manager] ignoring relative ${CHAT_ROOT_OVERRIDE_ENV}: ${value}`)
+      return null
+    }
+    return path.normalize(value)
+  }
+
   function resolveDocuments(): string {
     if (chatState.documentsRoot) return chatState.documentsRoot
     if (process.platform === 'win32') {
@@ -157,7 +205,13 @@ function apply(ctx: HostCtx): void {
     } else if (process.platform === 'linux') {
       const r = spawnSync('xdg-user-dir', ['DOCUMENTS'], { encoding: 'utf8' })
       const out = (r.stdout || '').trim()
-      if (r.status === 0 && out) {
+      // `xdg-user-dir` answers `$HOME` when the XDG user dirs are unconfigured,
+      // and `$HOME` is not a Documents folder: only an absolute path that is
+      // not the home directory itself is taken. Both sides are normalized so a
+      // trailing separator or a differently-spelled home cannot slip through.
+      // macOS needs no branch — its default Documents folder IS the
+      // `~/Documents` fallback below.
+      if (r.status === 0 && out && path.isAbsolute(out) && path.normalize(out) !== path.normalize(os.homedir())) {
         chatState.documentsRoot = out
         return out
       }
@@ -200,18 +254,25 @@ function apply(ctx: HostCtx): void {
     }
   }
 
-  function scanChatFolders(): void {
-    if (!chatState.root || !fs.existsSync(chatState.root)) return
+  /**
+   * Read every date folder under the chat root and load its registry.
+   * @returns the date folders found, in listing order (the boot pass also uses
+   *   them to make each one provisionable for DSH's Windows sandbox).
+   */
+  function scanChatFolders(): string[] {
+    const dateFolders: string[] = []
+    if (!chatState.root || !fs.existsSync(chatState.root)) return dateFolders
     let names
     try {
       names = fs.readdirSync(chatState.root, { withFileTypes: true })
     } catch {
-      return
+      return dateFolders
     }
     for (const d of names) {
       if (!d.isDirectory()) continue
       if (!/^\d{4}-\d{2}-\d{2}$/.test(d.name)) continue
       const dateFolder = path.join(chatState.root, d.name)
+      dateFolders.push(dateFolder)
       const sessions = readRegistry(dateFolder)
       for (const [sid, entry] of Object.entries(sessions)) {
         if (entry && typeof entry.slug === 'string' && typeof entry.folder === 'string' && !chatState.folders.has(sid)) {
@@ -219,6 +280,7 @@ function apply(ctx: HostCtx): void {
         }
       }
     }
+    return dateFolders
   }
 
   // ---- slug generation (LLM first, local fallback) ----
@@ -440,9 +502,24 @@ function apply(ctx: HostCtx): void {
         }
         const dateFolder = path.join(chatState.root, todayString())
         fs.mkdirSync(dateFolder, { recursive: true })
+        // This folder becomes the new session's workspace root, and DSH's
+        // `workspace-write` sandbox provisions that root on the chat's first
+        // confined tool call — which needs WRITE_DAC + WRITE_OWNER on it. A
+        // fresh folder inherits what its parent grants, and a parent on a
+        // volume without a CREATOR OWNER entry grants only "Modify": the tool
+        // call then dies with `SetNamedSecurityInfoW failed (Win32 5):
+        // grantWrite(<dateFolder>)`. Make the folder provisionable BEFORE any
+        // session can start in it. Best-effort: no ACE is needed at all under
+        // `danger-full-access`, so a failure reports instead of blocking.
+        const folderAccess = ensureWindowsFolderAccess(dateFolder)
+        if (!folderAccess.ok) {
+          console.warn(`[dsh-chat-manager] chat folder not provisionable: ${dateFolder} (${folderAccess.detail ?? 'unknown'})`)
+        } else if (folderAccess.detail !== undefined) {
+          console.warn(`[dsh-chat-manager] chat folder access unconfirmed: ${dateFolder} (${folderAccess.detail})`)
+        }
         let workspace = await ctx.workspaceRegistry.resolveByPath(dateFolder)
         if (workspace === undefined) workspace = await ctx.workspaceRegistry.create(dateFolder)
-        sendJson(res, 200, { workspaceId: workspace.id, dateFolder })
+        sendJson(res, 200, { workspaceId: workspace.id, dateFolder, folderAccess })
       } catch (err) {
         sendJson(res, 500, { error: errorMessage(err) })
       }
@@ -575,6 +652,18 @@ function apply(ctx: HostCtx): void {
             // Only a directory named after this Session may go wholesale;
             // anything else falls back to the single located file.
             const ownsDir = path.basename(dir) === sid
+            // The one platform-split branch of this route. On POSIX the session
+            // directory IS the lease holder (its `session.lock`) and the only
+            // way to stop a live write handle from recreating the log
+            // (`open(path, 'a')` creates), so a live session is refused there
+            // rather than deleted; Windows' lease is a path-derived kernel
+            // semaphore with no file, so the delete stays safe and unchanged.
+            const removal = planSessionArtifactRemoval({
+              platform: process.platform,
+              live: live !== undefined,
+              artifactInSessionDirectory: ownsDir,
+            })
+            if (removal === 'refuse-live-posix') throw new Error(POSIX_LIVE_DELETE_REFUSAL)
             // Materialize BEFORE removing, unconditionally: a Session this
             // process still tracks may hold bytes the backend has not written,
             // and a later (shutdown) flush would recreate what this delete just
@@ -587,7 +676,7 @@ function apply(ctx: HostCtx): void {
             } catch (err) {
               console.warn('[dsh-chat-manager] pre-delete flush failed:', errorMessage(err))
             }
-            if (ownsDir && fs.existsSync(dir)) {
+            if (removal === 'remove-directory' && fs.existsSync(dir)) {
               fs.rmSync(dir, { recursive: true, force: true })
               // Verified removal: a locked or undeletable artifact must fail the
               // request instead of leaving a Session that comes back later.
@@ -688,13 +777,63 @@ function apply(ctx: HostCtx): void {
 
   // ---- boot: resolve documents root and scan existing chat folders ----
   try {
-    chatState.documentsRoot = resolveDocuments()
-    chatState.root = path.join(chatState.documentsRoot, CHAT_ROOT_NAME)
-    scanChatFolders()
+    const override = chatRootOverride()
+    if (override !== null) {
+      // The override names the chat root itself, so no platform lookup runs and
+      // `/state` reports `documentsRoot: null` (the client reads `dshRoot`).
+      chatState.root = override
+    } else {
+      chatState.documentsRoot = resolveDocuments()
+      chatState.root = path.join(chatState.documentsRoot, CHAT_ROOT_NAME)
+    }
+    const dateFolders = scanChatFolders()
     console.log(`[dsh-chat-manager] chat root: ${chatState.root}`)
+    // Every existing date folder is some chat's workspace root and needs the
+    // same explicit full-control ACE a freshly created one gets: on a volume
+    // whose root ACL carries no CREATOR OWNER entry, the inherited "Modify"
+    // grants neither WRITE_DAC nor WRITE_OWNER, so DSH's workspace grant fails
+    // and that chat's first confined tool call dies with
+    // `SetNamedSecurityInfoW failed (Win32 5)`. Read-first, so an
+    // already-provisionable folder is never re-ACLed (and no inheritable ACE is
+    // re-propagated over a large chat folder); a failure only warns, because
+    // the ACE is unnecessary under `danger-full-access`.
+    if (process.platform === 'win32' && dateFolders.length > 0) {
+      // The pass is synchronous (it runs on the startup path) and the helper
+      // caps each icacls call, so the whole sweep is bounded too: a dead or very
+      // slow volume must not hold the Host's startup indefinitely. An exhausted
+      // pass warns and stops; the chat route still heals today's folder on demand.
+      const deadline = Date.now() + CHAT_FOLDER_SWEEP_BUDGET_MS
+      let checked = 0
+      let repaired = 0
+      let failed = 0
+      let exhausted = false
+      for (const dateFolder of dateFolders) {
+        if (Date.now() > deadline) {
+          exhausted = true
+          break
+        }
+        checked += 1
+        const access = ensureWindowsFolderAccess(dateFolder)
+        if (!access.ok) {
+          failed += 1
+          console.warn(`[dsh-chat-manager] chat folder not provisionable: ${dateFolder} (${access.detail ?? 'unknown'})`)
+        } else if (access.changed) {
+          repaired += 1
+        }
+      }
+      console.log(
+        `[dsh-chat-manager] chat folder access: ${checked}/${dateFolders.length} checked,`
+        + ` ${repaired} made provisionable, ${failed} failed${exhausted ? ' (sweep budget exhausted)' : ''}`,
+      )
+    }
   } catch (err) {
     console.warn('[dsh-chat-manager] boot scan failed:', err)
   }
 }
 
 export { apply, inject, name }
+// Re-exported for the decision-table tests: this host cannot run the POSIX
+// branch (or a real icacls listing) under test, so `test/*.test.mjs` pins both
+// pure seams from the built bundle.
+export { planSessionArtifactRemoval }
+export { readPrincipalControl } from './win-folder-access.ts'

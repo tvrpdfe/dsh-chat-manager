@@ -33,8 +33,16 @@ DSH workspace 存储域全局状态中的会话 id 列表（持久化在 `~/.dsh
 _Avoid_: 归档列表、隐藏列表
 
 **删除会话**：
-移除会话的持久化目录（`sessionPersistence.list()`/`stat(id)` 拿到 snapshot —— id 与 cwd 在 `snapshot.header` 上；`locate(header)` 只给**当前格式**的文件名，而迁移过的会话目录里还留着旧世代文件，所以删除单位是会话目录 `<root>/<slug>/<session-id>` 整目录，删前先 `flush()` 落盘、删后复核存在性，拿不出工件则报错而非谎报成功）、调用 `workspace.detachSession` 移除各工作区账目席位、摘除归档集合引用、清理聊天注册；聊天文件夹予以保留。取消归档置于最后，前置失败则不取消（杜绝删失败却回到工作区）。活跃会话的宿主内存态保留至进程重启，期间由客户端 localStorage 墓碑过滤器隐藏其行。
+移除会话的持久化目录（`sessionPersistence.list()`/`stat(id)` 拿到 snapshot —— id 与 cwd 在 `snapshot.header` 上；`locate(header)` 只给**当前格式**的文件名，而迁移过的会话目录里还留着旧世代文件，所以删除单位是会话目录 `<root>/<slug>/<session-id>` 整目录，删前先 `flush()` 落盘、删后复核存在性，拿不出工件则报错而非谎报成功）、调用 `workspace.detachSession` 移除各工作区账目席位、摘除归档集合引用、清理聊天注册；聊天文件夹予以保留。取消归档置于最后，前置失败则不取消（杜绝删失败却回到工作区）。活跃会话的宿主内存态保留至进程重启，期间由客户端 localStorage 墓碑过滤器隐藏其行。**平台分叉**：POSIX 上"本宿主仍持有"的会话直接拒绝删除（其写租约 `session.lock` 就在待删目录里，删掉即放弃跨进程写互斥），Windows 不受影响（租约是内核信号量、无锁文件）。
 _Avoid_: 移除会话、清理会话
+
+**聊天根覆盖点**：
+环境变量 `DSH_CHAT_MANAGER_ROOT`：直接指定聊天根（只接受绝对路径），跳过平台"文档"目录解析。用于无 XDG/无头环境、把聊天区放到别的卷，以及隔离验证（探针因此能在自建的、只有 Modify 权限的根上验证 Windows 文件夹修复而不碰实盘聊天树）。
+_Avoid_: 聊天目录变量、CHAT_HOME
+
+**可预置性（provisionability）/ 预置（write grant）**：
+Windows 上 DSH 的 `workspace-write` 沙箱在会话第一次受限工具调用时，给**工作区根**（聊天会话即日期文件夹）写入常驻 DACL 授权与 Low 完整性标签——这要求该目录上有有效的 `WRITE_DAC` 与 `WRITE_OWNER`。卷根 ACL 缺 `CREATOR OWNER` 项时（如搬移到 `E:\` 的"文档"目录），新建文件夹只继承 `Authenticated Users: Modify`（不含这两项权利），于是预置失败、第一次工具调用报 `grantWrite(...)` 权限错误。插件读一遍 `icacls` 清单：该账户自己的（含继承的）完全控制项即算"已可预置"、不写；只在缺失时补一条**显式、非继承**的当前用户完全控制 ACE（非继承是为了不把该账户的完全控制写遍整棵聊天文件夹），并回读确认；读到该账户自己的 deny（含 `F`/`WO`/`WD`）或回读不确认都如实报失败。
+_Avoid_: 权限修复、ACL 授权、沙箱授权
 
 **已归档会话栏目**：
 设置面板中新增的设置页，列出已归档会话（标题+归档时间），提供"恢复"与"删除"操作。

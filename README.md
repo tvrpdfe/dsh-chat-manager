@@ -28,6 +28,17 @@ DSH 的用户级插件，**Web UI 与桌面端通用**：侧边栏拆成「工�
 
 > 从 0.1.x 时代装过插件的，先读「从旧版升级」——仓库目录结构和插件包位置都变了。
 
+## 平台支持
+
+| 平台 | 状态 | 说明 |
+| --- | --- | --- |
+| Windows | 已实测 | 聊天根取系统「文档」目录（`[Environment]::GetFolderPath('MyDocuments')`）。若「文档」被搬到卷根 ACL 里没有 `CREATOR OWNER` 项的卷（例如 `E:\Documents`），新建的聊天文件夹只会继承到「修改」权限，DSH 的 `workspace-write` 沙箱就无法给它写授权，聊天里第一次工具调用会以 `grantWrite(...)` 权限错误失败——**插件会在创建聊天文件夹时（以及启动扫描既有日期文件夹时）自动补上你当前账户的完全控制项**，无需手工修复；它只在该账户还没有**有效**完全控制项时才写（正常卷上继承来的完全控制会让它直接跳过、一个字都不写），每次检查都有超时上限，失败只告警、不会拦住聊天创建。 |
+| Linux | 已支持，本机未实测 | 聊天根优先取 `xdg-user-dir DOCUMENTS`；未配置 XDG 用户目录时该命令会返回 `$HOME`，插件识别这种情况并回退 `~/Documents`。删除**当前活跃**的会话会被拒绝（原因见下），重启 DSH 后即可删除。 |
+| macOS | 已支持，本机未实测 | 聊天根为 `~/Documents/DSH`。删除活跃会话的规则同 Linux。 |
+
+- **POSIX 上为什么有时删不掉？** DSH 在 Linux/macOS 用会话目录里的 `session.lock`（`flock`）保证「同一会话不被两个进程同时写」。删除会话必须删掉整个会话目录（只删日志文件的话，活跃写句柄会把日志重新写出来），而锁文件就在其中——所以插件在**本宿主仍持有该会话**时直接拒绝删除，并提示「重启宿主后重试」；Windows 的写锁是内核对象、目录里没有锁文件，所以不受影响。另一个已知边界：POSIX 无法探测**别的进程**是否持有同一会话的锁，若你在两个 DSH 实例间共用同一个 `~/.dsh`，删除另一实例正在用的会话仍可能摘掉那个锁文件（Windows 无此问题）。
+- **聊天根换个位置**：设置环境变量 `DSH_CHAT_MANAGER_ROOT` 为绝对路径即可（跳过平台「文档」目录解析，例如放在别的盘或没有 XDG 配置的无头环境）。
+
 ## 前置依赖
 
 ```bash
@@ -139,7 +150,7 @@ dsh plugin --profile web add "link:$(pwd)"
 
 | 数据 | 位置 |
 | --- | --- |
-| 聊天根目录 | `文档/DSH/`（如 `E:\Documents\DSH\`） |
+| 聊天根目录 | `文档/DSH/`（如 `E:\Documents\DSH\`；可用环境变量 `DSH_CHAT_MANAGER_ROOT` 指定为其他绝对路径） |
 | 聊天登记表 | 每个日期文件夹内的 `.dsh-chat.json`（`{ sessionId: { slug, folder } }`，缺失时启动扫描重建） |
 | 归档集合 / 工作区账目 | `~/.dsh/storages/workspace.json`（workspace 存储域，沿用 DSH 原生机制） |
 | 删除墓碑（仅客户端过滤） | 浏览器 `localStorage` 的 `dsh-chat-manager.deletedSessionIds`，基线不再列出后自动清除 |
@@ -151,11 +162,11 @@ dsh plugin --profile web add "link:$(pwd)"
 ## 开发与验证
 
 - 源码用 TypeScript/TSX 维护（`src/`，浏览器半是内置 `ui-workspace` 客户端源码的分叉 + 插件 addon），构建产物为 Harness 加载的 JS bundle：`npm install && npm run build`（esbuild：宿主 ESM + 客户端 `__ModuleLoader__.load` 工厂 bundle）。
-- 类型门禁：`npm run verify`（= `npm run typecheck` + 重建 `lib/` + 下面的 bundle 门禁）零错误；产物改动后跑 `node --check lib/index.js lib/client.js`。
+- 类型门禁：`npm run verify`（= `npm run typecheck` + 重建 `lib/` + bundle 门禁 + `node --test "test/**/*.test.mjs"`）零错误；产物改动后跑 `node --check lib/index.js lib/client.js`。测试是纯函数决策表（删除工件的平台分叉、`icacls` 清单解析），从构建产物导入，因此排在 build 之后。
 - 构建：`npm run build` = esbuild 出 `lib/` **+ `node scripts/verify-bundle.mjs` 门禁**。门禁断言：`lib/client.js` 的 `require` 集合全部落在平台 seed 词内（`react`、`react/jsx-runtime`、`react-dom`、`react-dom/client`、`@deepseek-ai/cordis`、`@deepseek-ai/dsh-client-store`、`@deepseek-ai/dsh-client-ui-slots`、`@deepseek-ai/dsh-client-ui-primitives`、`@deepseek-ai/dsh-client-ui-dockkit`）；不含 0.1.x 图标/hook 名；CSS 哈希类名以 `m` 开头，且**逐张样式表**校验「改名后的类必须出现在本表选择器里、不得残留未哈希的 `.local`」（断言只看选择器位置：注释与引号字符串先被剥离，否则注释里的类名会喂饱「必须出现」那条造成假绿；复合选择器只改首个类名会让整条规则失效——行菜单因此曾在鼠标移入时跳到窗口左上角并消失）；工厂 id 等于包名；**产物必须比源码新**（任何 `src/**`、`scripts/build.mjs`、`package.json` 比 `lib/*.js` 新即失败并提示重建——门禁只认产物，不会替你重建）。
 - 分叉对照：`node scripts/fork-diff.mjs` 把 `src/client/` 与上游 `ui-workspace` 客户端源码逐字节对比，记录写入 `.scratch/std-fork-diffs/`（空 diff = 与上游一致），并打印锚定的上游 commit。
 - 改完重建 + 重启验证实例：浏览器半改 `src/client/` 后 `npm run build` 重启 dsh（bundle rev 随启动图更新）+ Ctrl+F5；宿主半改 `src/index.ts` 后重启 dsh 即可。
-- 真机验证（headless Chrome，可用 `$DSH_CHROME` 指定 Chrome 路径）：`.scratch/` 下的 CDP 探针脚本（boot 探针：无失败页 + 双区域渲染 + 零 console 错误；`accept5-menu-mouse.mjs`：真实鼠标滑行下菜单锚定不漂移、可点中「删除会话」；`accept6-delete-durable.mjs` + `accept6-phase2.mjs`：设置页删除后磁盘会话目录消失、宿主重启不复活；`accept7-row-menu-delete.mjs` + `accept7-phase2.mjs`：**行菜单**上的删除确认（用自建非空白会话，空白行没有动作条）；菜单探针：会话菜单项各出现一次、删除确认框；设置页探针：已归档会话 tab 注册、相对时间渲染；宿主路由探针）；共享 `tools/cdp-lib.mjs`。**验证实例要与实盘应用隔离 `$DSH_HOME`**（把 `~/.dsh` 复制成一次性副本、按原名重建一个 junction 再 `DSH_HOME=<副本> dsh --profile cmtest --port 3199 --no-open`），否则两个宿主会互相覆盖同一份 storages。
+- 真机验证（headless Chrome，可用 `$DSH_CHROME` 指定 Chrome 路径）：`.scratch/` 下的 CDP 探针脚本（boot 探针：无失败页 + 双区域渲染 + 零 console 错误；`accept5-menu-mouse.mjs`：真实鼠标滑行下菜单锚定不漂移、可点中「删除会话」；`accept6-delete-durable.mjs` + `accept6-phase2.mjs`：设置页删除后磁盘会话目录消失、宿主重启不复活；`accept7-row-menu-delete.mjs` + `accept7-phase2.mjs`：**行菜单**上的删除确认（用自建非空白会话，空白行没有动作条）；菜单探针：会话菜单项各出现一次、删除确认框；设置页探针：已归档会话 tab 注册、相对时间渲染；宿主路由探针；`accept8-restore.mjs` + `accept8-phase2.mjs`：归档→恢复往返后账本与日志逐项未被触碰、重启后仍在原位；`accept9-live-guard.mjs` + `accept9-phase2.mjs`：活跃会话的日志被带外删除后删除请求被拒且不写墓碑，重启后同一幽灵行可删；`accept10-chat-folder-acl.mjs` + `accept10-phase2.mjs`：在一个自建的「只继承修改权限」的隔离聊天根上，先量出**修复前**的 `SetNamedSecurityInfoW failed (Win32 5)`（用平台自身的授权代码，对同一个日期文件夹测），再证明插件补权限后同一次授权**成功**、启动扫描能修复既有日期文件夹（探针只在根里有自己写的标记时才整根删除，避免误配覆盖点时删到真实聊天树）；共享 `tools/cdp-lib.mjs`。**验证实例要与实盘应用隔离 `$DSH_HOME`**（把 `~/.dsh` 复制成一次性副本、按原名重建一个 junction 再 `DSH_HOME=<副本> dsh --profile cmtest --port 3199 --no-open`），否则两个宿主会互相覆盖同一份 storages；`accept10` 还要用 `DSH_CHAT_MANAGER_ROOT` 把聊天根也指向一次性目录，以免动到实盘聊天文件夹的权限。
 - 需求与规格：`.scratch/chat-manager/spec.md`；领域词汇：`CONTEXT.md`；命名时序决策：`docs/adr/0001-chat-folder-naming.md`。
 
 ## 许可证

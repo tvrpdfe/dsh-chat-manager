@@ -109,8 +109,12 @@ try {
   //    A plain read: a failing first read must fail the probe, not read as "no archived
   //    Sessions" (which would also disarm the fixture filter).
   const archivedBefore = await archivedList();
-  const sid = pane.usable.find(id => !archivedBefore.includes(id));
-  check('1 the ledger is readable and the fixture is un-archived', Array.isArray(archivedBefore) && typeof sid === 'string', `sid=${sid} archived=${JSON.stringify(archivedBefore)}`);
+  // A row whose log is already gone is a *deleted* Session still in the baseline:
+  // the tombstone lives in the browser profile, so a fresh probe profile sees the
+  // stale row until a Host restart drops it. Requiring a log on disk makes the
+  // fixture independent of whether a delete probe ran against this Host first.
+  const sid = pane.usable.find(id => !archivedBefore.includes(id) && dirsOf(id).length > 0);
+  check('1 the ledger is readable and the fixture is un-archived with a log on disk', Array.isArray(archivedBefore) && typeof sid === 'string', `sid=${sid} archived=${JSON.stringify(archivedBefore)}`);
   if (typeof sid !== 'string') throw new Error('no fixture row available');
   console.log(`fixture S=${sid}`);
   // Archiving drops a pin and restoring does not bring it back, so a pinned fixture

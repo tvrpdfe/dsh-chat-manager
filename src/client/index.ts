@@ -276,7 +276,22 @@ export function apply(ctx: Context): void {
       .some(item => item.workspaceId === workspaceId) ? workspaceId : undefined, 24)
   const startChatRpc = async (): Promise<void> => {
     const data = await rpcPost('/api/chat-manager/ensure-date-folder', {})
-    const payload = data as { dateFolder?: unknown; workspaceId?: unknown }
+    const payload = data as {
+      dateFolder?: unknown
+      workspaceId?: unknown
+      /** Host fact: whether the chat folder was made provisionable for the sandbox. */
+      folderAccess?: { ok?: unknown; detail?: unknown } | null
+    }
+    // The chat still starts when the folder was not made provisionable, so this
+    // is a diagnostic rather than a failure: the Host already logged the detail,
+    // and the user-visible symptom (if the sandbox needs the folder) arrives
+    // later as a Windows permission error on the first tool call.
+    if (payload.folderAccess != null && payload.folderAccess.ok === false) {
+      console.warn(
+        'dsh-chat-manager: the chat folder could not be made provisionable for the DSH file sandbox'
+        + (typeof payload.folderAccess.detail === 'string' ? `: ${payload.folderAccess.detail}` : ''),
+      )
+    }
     const declared = typeof payload.workspaceId === 'string' && payload.workspaceId.length > 0
       ? payload.workspaceId
       : undefined

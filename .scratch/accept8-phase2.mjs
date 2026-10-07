@@ -72,13 +72,23 @@ try {
   check('2 the archived list still does not contain S', Array.isArray(archived) && !archived.includes(sid), JSON.stringify(archived));
   check('3 the row is still there, in the chat pane', rowState.present === true && rowState.inChatPane === true, JSON.stringify(rowState));
   check('4 the log is still on disk', dirs.length > 0 && dirs[0].files.length > 0, JSON.stringify(dirs));
-  // Phase 1 asserts the round trip's set EQUALITY while it controls the whole timeline;
-  // a phase 2 may share its home with another probe that archives its own fixture, so the
-  // honest invariant here is "nothing that was archived before phase 1 got dropped, and
-  // our fixture is still not archived".
-  check('5 every pre-existing archived id is still archived, and S is not',
-    Array.isArray(ledger) && !ledger.includes(sid) && result.archivedBefore.every(id => ledger.includes(id)),
-    `start=${JSON.stringify(result.archivedBefore)} now=${JSON.stringify(ledger)}`);
+  // Phase 1 asserts the round trip's set EQUALITY while it controls the whole timeline.
+  // A phase 2 shares its home with other probes, so two legitimate changes can reach its
+  // archive set: a sibling probe may ARCHIVE its own fixture, and a sibling delete probe
+  // may DELETE its own fixture (dropping the id is that delete's whole point). The honest
+  // invariant is therefore "S is still un-archived, and every id the ledger dropped belongs
+  // to a session whose log is really gone".
+  // A missing baseline is NOT an empty baseline: without phase 1's snapshot the
+  // "only dropped log-less ids" claim is unprovable, so it must fail rather than
+  // degrade into "S is still un-archived".
+  const hasBaseline = Array.isArray(result.archivedBefore)
+  const dropped = hasBaseline && Array.isArray(ledger)
+    ? result.archivedBefore.filter(id => !ledger.includes(id))
+    : null;
+  const droppedWithLog = dropped === null ? ['no phase-1 archive baseline in the result file'] : dropped.filter(id => dirsOf(id).length > 0);
+  check('5 S stays un-archived and the ledger only dropped sessions whose log is gone',
+    hasBaseline && Array.isArray(ledger) && !ledger.includes(sid) && droppedWithLog.length === 0,
+    `start=${JSON.stringify(result.archivedBefore)} now=${JSON.stringify(ledger)} dropped=${JSON.stringify(dropped)} dropped-with-log=${JSON.stringify(droppedWithLog)}`);
   check('6 no console errors', app.consoleErrors().length === 0, JSON.stringify(app.consoleErrors().map(e => e.text.slice(0, 160))));
 } finally {
   console.log(failures.length === 0 ? 'PHASE2 ALL PASS' : `PHASE2 FAILURES: ${failures.join(', ')}`);
