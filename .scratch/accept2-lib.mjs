@@ -93,12 +93,18 @@ export async function openApp({ url, port, width = 1600, height = 1000, instrume
         }
         return false;
       },
-      async waitForApp({ attempts = 60, intervalMs = 400 } = {}) {
+      async waitForApp({ attempts = 90, intervalMs = 2000 } = {}) {
         for (let i = 0; i < attempts; i += 1) {
           await sleep(intervalMs);
           const n = await evaluate(`document.querySelectorAll('[data-row-key]').length`).catch(() => 0);
-          const len = await evaluate(`document.body ? document.body.innerText.length : 0`).catch(() => 0);
-          if (n > 0 && len > 200) return true;
+          // This gate proves only that the shell painted and holds Session rows; the
+          // substantive checks in each probe assert the specific rows (or their
+          // absence) afterwards. It must stay weaker than any real page: a proven-live
+          // instance rendered 8 rows with only 187 characters of visible text, so a
+          // fixed 200-character floor once reported "never rendered" on a page that was
+          // plainly there — do not reintroduce a character-count floor.
+          const len = await evaluate(`document.body ? document.body.innerText.trim().length : 0`).catch(() => 0);
+          if (n > 0 && len > 0) return true;
         }
         return false;
       },

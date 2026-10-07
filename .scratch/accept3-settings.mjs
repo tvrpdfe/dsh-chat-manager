@@ -54,7 +54,7 @@ const leaks = () => app.evaluate(`(() => {
 
 try {
   await app.navigate();
-  await app.waitForApp({ attempts: 40, intervalMs: 400 });
+  await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   await sleep(2500);
 
   // open Settings

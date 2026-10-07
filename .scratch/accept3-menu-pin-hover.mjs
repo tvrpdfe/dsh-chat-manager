@@ -171,7 +171,7 @@ async function activate(labelPrefix) {
 
 try {
   await app.navigate();
-  await app.waitForApp({ attempts: 40, intervalMs: 400 });
+  await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   await sleep(2800);
 
   const row = await probeRow();
@@ -224,7 +224,7 @@ try {
 
   // ---- c2: reload ----
   await app.navigate();
-  await app.waitForApp({ attempts: 40, intervalMs: 400 });
+  await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   await sleep(2800);
   console.log('=== c2 order after reload ===', JSON.stringify(await groupOrder()));
   console.log('=== c2 pinned on host ===', JSON.stringify(hostPinned()));

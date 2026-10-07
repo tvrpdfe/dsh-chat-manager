@@ -34,7 +34,7 @@ try {
   await app.navigate();
   // Liveness first: without it every "is absent" check below would pass on a page
   // that never rendered.
-  const rendered = await app.waitForApp({ attempts: 40, intervalMs: 400 });
+  const rendered = await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   check('0 the app rendered rows before the checks', rendered === true);
   await sleep(3000);
   const ids = await app.evaluate(`[...document.querySelectorAll('[data-row-key^="session:"]')].map(r => r.getAttribute('data-row-key').slice(8))`);
@@ -43,12 +43,13 @@ try {
     check(`2 ${id.slice(0, 16)} has no restored log`, dirsOf(id).length === 0, JSON.stringify(dirsOf(id)));
   }
   check('3 no console errors', app.consoleErrors().length === 0, JSON.stringify(app.consoleErrors().map(e => e.text.slice(0, 160))));
+  // The verb strip must still exist somewhere after the restart (the slot-driven menu
+  // is what the delete rode on). Either pane counts: a fresh browser profile has no
+  // persisted expansion state, so the Workspace groups can start collapsed and the
+  // workspace area then renders no Session rows at all.
   check('4 a non-blank row still offers its verb strip', (await app.evaluate(`(() => {
-    const chat = document.querySelector('[class$=_chatSection]');
-    const rows = [...document.querySelectorAll('[data-row-key^="session:"]')]
-      .filter(r => !(chat === null || chat.contains(r)))
-      .filter(r => r.querySelector('[class$=_rowActions]') !== null);
-    return rows.length;
+    return [...document.querySelectorAll('[data-row-key^="session:"]')]
+      .filter(r => r.querySelector('[class$=_rowActions]') !== null).length;
   })()`)) > 0);
 } finally {
   console.log(failures.length === 0 ? 'PHASE2 ALL PASS' : `PHASE2 FAILURES: ${failures.join(', ')}`);

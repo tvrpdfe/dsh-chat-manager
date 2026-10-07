@@ -2,10 +2,11 @@
 // reach the destructive confirm through the settings page, because a blank
 // Session hides its whole verb strip upstream (`{!row.blank && <span
 // className={css.rowActions}>}`) — so its row menu cannot be opened at all.
-// This probe therefore builds a NON-BLANK Session of its own (one real turn in
-// a chat it created), opens the row menu with a real mouse, clicks 删除会话,
-// clicks the destructive confirm, and proves the persisted log directory is
-// gone — not just the row.
+// This probe therefore gives the chat pane's current blank Session one real turn
+// (which is what makes its verb strip exist), opens the row menu with a real
+// mouse, clicks 删除会话, clicks the destructive confirm, and proves the persisted
+// log directory is gone — not just the row. It also pins the Session first, so the
+// delete has to drop the id from the registry-global pin set as well.
 //
 // The home is resolved from DSH_HOME so the probe can run against a throwaway
 // copy of the home instead of the live one.
@@ -50,6 +51,14 @@ function logState(id) {
 function registryHas(id) {
   try { return fs.readFileSync(REGISTRY, 'utf8').includes(id); } catch { return null; }
 }
+/** The registry-global pin set as persisted on disk (empty array when unreadable). */
+function ledgerPinned() {
+  try {
+    const state = JSON.parse(fs.readFileSync(REGISTRY, 'utf8'));
+    const ids = state?.global?.pinnedSessionIds;
+    return Array.isArray(ids) ? ids : [];
+  } catch { return []; }
+}
 
 const failures = [];
 const check = (name, ok, detail = '') => {
@@ -58,7 +67,6 @@ const check = (name, ok, detail = '') => {
 };
 
 const app = await openApp({ url: URL, port: PORT });
-const domIds = () => app.evaluate(`[...document.querySelectorAll('[data-row-key^="session:"]')].map(r => r.getAttribute('data-row-key').slice(8))`);
 const key = (sid) => `session:${sid}`;
 /** The probe's own chat folder (and the chat root holding it), for the cleanup:
  *  the chat root follows the system Documents folder, not DSH_HOME. */
@@ -68,24 +76,40 @@ const startedAt = Date.now();
 
 try {
   await app.navigate();
-  if (!(await app.waitForApp({ attempts: 40, intervalMs: 400 }))) throw new Error('app never rendered rows');
+  if (!(await app.waitForApp({ attempts: 90, intervalMs: 2000 }))) throw new Error('app never rendered rows');
   await sleep(2500);
   console.log(`DSH_HOME=${DSH}`);
-  const idsBefore = await domIds();
   const marker = await app.evaluate(`(() => { document.documentElement.dataset.a7 = 'alive'; return { nav: performance.getEntriesByType('navigation').length, origin: performance.timeOrigin }; })()`);
 
-  // 1. Create a chat of the probe's own.
-  const add = await app.rect('[aria-label="新建聊天"]');
-  if (add === null) throw new Error('no 新建聊天 button');
-  await app.mouseClick(add.x, add.y);
+  // 1. The fixture is the chat pane's current blank Session. DSH reuses an existing
+  //    blank Session for the same date folder, so clicking 新建聊天 on top of one
+  //    creates nothing new — the blank row itself is the chat this probe gives its
+  //    one real turn to.
+  const blankChatRow = () => app.evaluate(`(() => {
+    const chat = document.querySelector('[class$=_chatSection]');
+    if (chat === null) return null;
+    const r = [...chat.querySelectorAll('[data-row-key^="session:"]')]
+      .find(x => x.querySelector('[class$=_rowActions]') === null);
+    return r === undefined ? null : { id: r.getAttribute('data-row-key').slice(8), selected: r.className.includes('selected') };
+  })()`).catch(() => null);
   let sid = null;
-  for (let i = 0; i < 40 && sid === null; i += 1) {
-    await sleep(500);
-    const fresh = (await domIds().catch(() => [])).filter(id => !idsBefore.includes(id));
-    if (fresh.length > 0) sid = fresh[0];
+  for (let i = 0; i < 30 && sid === null; i += 1) {
+    await sleep(1000);
+    const found = await blankChatRow();
+    if (found !== null && found.selected === true) sid = found.id;
   }
-  if (sid === null) throw new Error('新建聊天 created no session');
-  console.log(`new session S=${sid}`);
+  if (sid === null) {
+    const add = await app.rect('[aria-label="新建聊天"]');
+    if (add === null) throw new Error('no 新建聊天 button');
+    await app.mouseClick(add.x, add.y);
+    for (let i = 0; i < 60 && sid === null; i += 1) {
+      await sleep(1000);
+      const found = await blankChatRow();
+      if (found !== null) sid = found.id;
+    }
+  }
+  if (sid === null) throw new Error('no blank chat session to work with');
+  console.log(`blank chat S=${sid}`);
 
   // The row must start blank: that is exactly why this path needed its own probe.
   const blankAtCreate = (await app.evaluate(`document.querySelector('[data-row-key=${JSON.stringify(key(sid))}] [class$=_rowActions]') === null`)) === true;
@@ -151,6 +175,32 @@ try {
     const s = document.querySelector('[data-row-key=${JSON.stringify(key(sid))}] [class$=_rowActions]');
     return s !== null && getComputedStyle(s).display !== 'none';
   })()`)) === true);
+
+  // 4b. Pin it through the strip's hover action first: the delete route must drop
+  //     the id from the registry-global pin set too, otherwise the ledger keeps a
+  //     dangling pin forever. Pinning also re-orders the list, so the row is
+  //     re-measured and re-hovered before the menu is opened for the delete.
+  const pinBtn = await app.evaluate(`(() => {
+    const row = document.querySelector('[data-row-key=${JSON.stringify(key(sid))}]');
+    const b = [...row.querySelectorAll('button')].find(x => (x.getAttribute('aria-label') || '') === '置顶会话');
+    if (b === undefined) return null;
+    const r = b.getBoundingClientRect();
+    return { x: Math.round(r.x + r.width / 2), y: Math.round(r.y + r.height / 2) };
+  })()`);
+  check('6b the hovered strip offers 置顶会话', pinBtn !== null, JSON.stringify(pinBtn));
+  if (pinBtn === null) throw new Error('no pin action on the hovered row');
+  await app.mouseClick(pinBtn.x, pinBtn.y);
+  let pinned = false;
+  for (let i = 0; i < 30 && !pinned; i += 1) {
+    await sleep(500);
+    pinned = ledgerPinned().includes(sid);
+  }
+  check('6c the Host pin set now lists S', pinned, JSON.stringify(ledgerPinned()));
+  const pinnedRect = await app.rect(`[data-row-key=${JSON.stringify(key(sid))}]`);
+  check('6d the row survived the re-order', pinnedRect !== null, JSON.stringify(pinnedRect));
+  if (pinnedRect === null) throw new Error('the pinned row has no box');
+  await app.mouseMove(pinnedRect.x, pinnedRect.y);
+  await sleep(600);
 
   const trigger = await app.evaluate(`(() => {
     const r = document.querySelector('[data-row-key=${JSON.stringify(key(sid))}]');
@@ -244,6 +294,11 @@ try {
   for (let i = 0; i < 10 && registryAfter === true; i += 1) { await sleep(500); registryAfter = registryHas(sid); }
   check('21a the ledger listed S before the delete', registryBefore === true, String(registryBefore));
   check('21b the Host registry no longer lists it', registryAfter === false, `before=${registryBefore} after=${registryAfter}`);
+  // The pin-clearing half of the same change: the pin set is registry-global, so a
+  // deleted pin would linger in the ledger forever (harmless but dangling).
+  let pinGone = !ledgerPinned().includes(sid);
+  for (let i = 0; i < 10 && !pinGone; i += 1) { await sleep(500); pinGone = !ledgerPinned().includes(sid); }
+  check('21c the Host pin set no longer lists it', pinGone, JSON.stringify(ledgerPinned()));
 
   // The acceptance clause the delete must NOT take with it: 删除会话 removes the
   // persisted Session log, not the chat folder the Session writes its files to.

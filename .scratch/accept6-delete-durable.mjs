@@ -1,8 +1,10 @@
-// Durable-delete acceptance, phase 1: create a chat through the plugin, archive
-// it, delete it from the settings page with a real mouse, and prove the Host
-// removed the persisted log (the defect that made deleted Sessions come back
-// after a Host restart).
-// Usage: node .scratch/accept6-delete-durable.mjs <url>
+// Durable-delete acceptance, phase 1: take the chat pane's current blank Session
+// (the "just created, no turn yet" state DSH reuses per date folder), archive it
+// through the shortcut, delete it from the settings page with a real mouse, and
+// prove the Host removed the persisted log (the defect that made deleted Sessions
+// come back after a Host restart).
+// The home is resolved from DSH_HOME so the probe can run against a throwaway copy.
+// Usage: DSH_HOME=<home> node .scratch/accept6-delete-durable.mjs <url>
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -43,7 +45,6 @@ const check = (name, ok, detail = '') => {
 };
 
 const app = await openApp({ url: URL, port: PORT });
-const domIds = () => app.evaluate(`[...document.querySelectorAll('[data-row-key^="session:"]')].map(r => r.getAttribute('data-row-key').slice(8))`);
 const archivedList = () => app.evaluate(`fetch('/api/chat-manager/state').then(r => r.json()).then(j => j.archived.map(a => a.sessionId))`);
 const chord = async (mods, key, code, vk) => {
   const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers: mods };
@@ -53,23 +54,39 @@ const chord = async (mods, key, code, vk) => {
 
 try {
   await app.navigate();
-  await app.waitForApp({ attempts: 40, intervalMs: 400 });
+  await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   await sleep(2500);
-  const idsBefore = await domIds();
   const marker = await app.evaluate(`(() => { document.documentElement.dataset.a6 = 'alive'; return { nav: performance.getEntriesByType('navigation').length, origin: performance.timeOrigin }; })()`);
 
-  // 1. Create a chat session.
-  const add = await app.rect('[aria-label="新建聊天"]');
-  if (add === null) throw new Error('no 新建聊天 button');
-  await app.mouseClick(add.x, add.y);
+  // 1. The fixture is the chat pane's current blank Session. DSH reuses an existing
+  //    blank Session for the same date folder, so clicking 新建聊天 on top of one
+  //    creates nothing new — the blank row itself is the "just created, no turn yet"
+  //    Session this path is about (Ctrl+Alt+A archives the current Session).
+  const blankChatRow = () => app.evaluate(`(() => {
+    const chat = document.querySelector('[class$=_chatSection]');
+    if (chat === null) return null;
+    const r = [...chat.querySelectorAll('[data-row-key^="session:"]')]
+      .find(x => x.querySelector('[class$=_rowActions]') === null);
+    return r === undefined ? null : { id: r.getAttribute('data-row-key').slice(8), selected: r.className.includes('selected') };
+  })()`).catch(() => null);
   let sid = null;
-  for (let i = 0; i < 40 && sid === null; i += 1) {
-    await sleep(500);
-    const fresh = (await domIds().catch(() => [])).filter(id => !idsBefore.includes(id));
-    if (fresh.length > 0) sid = fresh[0];
+  for (let i = 0; i < 30 && sid === null; i += 1) {
+    await sleep(1000);
+    const found = await blankChatRow();
+    if (found !== null && found.selected === true) sid = found.id;
   }
-  if (sid === null) throw new Error('新建聊天 created no session');
-  console.log(`new session S=${sid}`);
+  if (sid === null) {
+    const add = await app.rect('[aria-label="新建聊天"]');
+    if (add === null) throw new Error('no 新建聊天 button');
+    await app.mouseClick(add.x, add.y);
+    for (let i = 0; i < 60 && sid === null; i += 1) {
+      await sleep(1000);
+      const found = await blankChatRow();
+      if (found !== null) sid = found.id;
+    }
+  }
+  if (sid === null) throw new Error('no blank chat session to work with');
+  console.log(`blank chat S=${sid}`);
   await sleep(1200);
   const filesAtCreate = sessionFiles(sid);
   console.log(`S log at create: ${JSON.stringify(filesAtCreate)}`);

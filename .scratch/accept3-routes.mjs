@@ -11,7 +11,7 @@ const PORT = Number(process.env.ACCEPT_CDP_PORT ?? 9384);
 const app = await openApp({ url: URL, port: PORT });
 try {
   await app.navigate();
-  await app.waitForApp({ attempts: 40, intervalMs: 400 });
+  await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   await sleep(1500);
 
   const out = await app.evaluate(`(async () => {

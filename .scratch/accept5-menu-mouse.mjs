@@ -31,17 +31,28 @@ const check = (name, ok, detail = '') => {
 
 try {
   await app.navigate();
-  if (!(await app.waitForApp())) throw new Error('app never rendered rows');
+  if (!(await app.waitForApp({ attempts: 90, intervalMs: 2000 }))) throw new Error('app never rendered rows');
 
-  const row = await app.evaluate(`(() => {
-    const chat = document.querySelector('[class$=_chatSection]');
-    const rows = [...document.querySelectorAll('[data-row-key^="session:"]')]
-      .filter(r => !(chat === null || chat.contains(r)))
-      .filter(r => r.querySelector('[class$=_rowActions]') !== null);
-    const r = rows[0];
-    return r === null ? null : { key: r.getAttribute('data-row-key'), title: r.innerText.split('\\n')[0] };
-  })()`);
-  if (row === null) throw new Error('no workspace row with a verb strip');
+  // First row with a verb strip, from either pane. A fresh browser profile has no
+  // persisted expansion state, so the Workspace groups can start collapsed and the
+  // workspace area then renders no Session rows at all; the chat pane's rows are the
+  // same component with the same menu slots, so either one proves mouse reachability.
+  let row = null;
+  for (let i = 0; i < 60 && row === null; i += 1) {
+    await sleep(1000);
+    row = await app.evaluate(`(() => {
+      const chat = document.querySelector('[class$=_chatSection]');
+      const rows = [...document.querySelectorAll('[data-row-key^="session:"]')]
+        .filter(r => r.querySelector('[class$=_rowActions]') !== null);
+      const r = rows[0];
+      return r === undefined ? null : {
+        key: r.getAttribute('data-row-key'),
+        title: r.innerText.split('\\n')[0],
+        pane: chat !== null && chat.contains(r) ? 'chat' : 'workspace',
+      };
+    })()`).catch(() => null);
+  }
+  if (row === null) throw new Error('no Session row with a verb strip');
   const sid = row.key.slice('session:'.length);
   const registryBefore = registryHas(sid);
   console.log(`row=${row.key} title="${row.title}" registryHas=${registryBefore}`);

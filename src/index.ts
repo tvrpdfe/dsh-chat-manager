@@ -54,6 +54,8 @@ interface WorkspaceView {
  * members carry the shapes this plugin actually touches.
  */
 interface HostCtx extends Record<string, any> {
+  /** Optional-peer lookup (`sessions` is the platform's live Session store). */
+  get: (name: string) => { get?: (id: string) => unknown } | undefined
   webServer: {
     register: (route: object, ...rest: unknown[]) => unknown
   }
@@ -61,8 +63,19 @@ interface HostCtx extends Record<string, any> {
     list: () => WorkspaceView[]
     resolveByPath: (p: string) => Promise<WorkspaceView | undefined>
     create: (p: string) => Promise<WorkspaceView>
-    requireState: () => { archivedSessionIds: string[] }
-    setState: (state: { archivedSessionIds: string[] }) => Promise<void>
+    /**
+     * The platform's own un-archive: drops the id from the registry-global
+     * archive set on the registry's operation chain. It is idempotent (an id
+     * that is not archived resolves without a write), so the caller needs no
+     * precondition read.
+     */
+    unarchiveSession: (sessionId: string) => Promise<void>
+    /**
+     * The platform's own unpin: drops the id on the registry write chain and,
+     * unlike `pinSession`, runs no session-existence check — removing an id
+     * cannot introduce an unknown one. Also idempotent.
+     */
+    unpinSession: (sessionId: string) => Promise<void>
   }
   storageDomain: {
     get: (name: string) => {
@@ -120,10 +133,13 @@ function apply(ctx: HostCtx): void {
     documentsRoot: string | null
     root: string | null
     folders: Map<string, ChatFolderEntry>
+    /** Epoch ms this Host process started, for the routes' `hostStartedAt` fact. */
+    hostStartedAt: number
   } = {
     documentsRoot: null,
     root: null,
     folders: new Map(),
+    hostStartedAt: Date.now() - Math.round(process.uptime() * 1000),
   }
 
   /** Session ids whose slug generation is in flight (first-message dedup). */
@@ -344,14 +360,18 @@ function apply(ctx: HostCtx): void {
   /** Workspace storage domain handle (undefined when the domain is absent). */
   const workspaceDomain = (): ReturnType<HostCtx['storageDomain']['get']> => ctx.storageDomain.get('workspace')
 
+  /**
+   * Drop one id from the registry-global archive set through the platform's own
+   * un-archive — a real platform write, not a UI mask: the Host's
+   * `agent/pre-step` gate and every client snapshot read that same field, and it
+   * is durable when the call resolves (the storage domain rewrites
+   * `workspace.json` before updating memory and emitting `domain/changed`, which
+   * is what pushes the `archived` increment to every client). The platform
+   * method is idempotent and serialized on the registry's operation chain, so no
+   * precondition read is needed and no concurrent archive can be overwritten.
+   */
   async function removeFromArchive(sid: string): Promise<void> {
-    const registry = ctx.workspaceRegistry
-    const state = registry.requireState()
-    if (!state.archivedSessionIds.includes(sid)) return
-    await registry.setState({
-      ...state,
-      archivedSessionIds: state.archivedSessionIds.filter((x) => x !== sid),
-    })
+    await ctx.workspaceRegistry.unarchiveSession(sid)
   }
 
   // ---- routes ----
@@ -396,6 +416,10 @@ function apply(ctx: HostCtx): void {
           dshRoot: chatState.root,
           folders,
           archived: archivedRows,
+          // Host identity, not chat state: a probe (or a user) can tell one Host
+          // process from the next one, which is what makes "survives a Host
+          // restart" an assertable claim instead of a procedure note.
+          hostStartedAt: chatState.hostStartedAt,
         })
       } catch (err) {
         sendJson(res, 500, { error: errorMessage(err) })
@@ -498,11 +522,33 @@ function apply(ctx: HostCtx): void {
           const snapshot = snapshots.find(
             (entry: { header?: { id?: string } }) => entry.header?.id === sid,
           ) ?? await ctx.sessionPersistence.stat(sid)
+          // The Host's public live lookup (the same call the Workspace registry's
+          // own `sessionKnown` uses). Both branches below consult it: a Session the
+          // Host still holds live can grow an artifact again, so no branch may
+          // report success without one.
+          const live = ctx.get('sessions')?.get?.(sid)
+          const liveWarning = ' the Host still holds it live, so a later flush could write it back:'
+            + ' restart the Host and retry.'
           if (snapshot === undefined) {
-            // The Host knows no such stored Session: there is no durable
-            // artifact to remove, so the accounting-only delete below is the
-            // complete answer. Say so, because an id the Host forgot is also
-            // what a stale client request looks like.
+            // The Host names no stored Session. Two very different situations reach
+            // here, and only one of them may answer 200:
+            //   - a ghost id (an archived row whose log is already gone, or a stale
+            //     client request): nothing on disk and nothing live, so the
+            //     accounting-only delete below IS the complete answer;
+            //   - a Session the Host still holds live (its artifact was removed out
+            //     of band, or became unreadable to the persistence layer — `list()`
+            //     skips an artifact whose header it cannot parse): a 200 here would
+            //     hide the row with a client tombstone while a live write handle can
+            //     still write that artifact back, i.e. the exact "deleted row comes
+            //     back" disagreement the delete route must never create.
+            // NOTE: a merely *unmaterialized* live Session never lands here — the
+            // JSONL backend lists its own created-but-unmaterialized Sessions, so it
+            // takes the artifact branch below and is refused by that branch's
+            // "reported a stored session but no log exists" error. This guard is the
+            // defensive half of the same rule for everything the listing cannot see.
+            if (live !== undefined) {
+              throw new Error(`the Host names no stored log for ${sid} yet${liveWarning}`)
+            }
             console.warn(`[dsh-chat-manager] delete-session: the Host reports no stored session for ${sid}; removing accounting only`)
           } else {
             // `locate` is the backend's own artifact mapping (kind + absolute
@@ -560,8 +606,12 @@ function apply(ctx: HostCtx): void {
             } else {
               // The Host names a stored Session, yet no artifact exists even
               // after the flush. Nothing here proves the log is gone, and a 200
-              // would tombstone the row while the durable Session survives.
-              throw new Error(`the Host reported a stored session but no log exists for ${sid}`)
+              // would tombstone the row while the durable Session survives (or a
+              // live handle writes it back).
+              throw new Error(
+                `the Host reported a stored session but no log exists for ${sid}`
+                + (live === undefined ? '' : `;${liveWarning}`),
+              )
             }
           }
         } catch (err) {
@@ -575,7 +625,19 @@ function apply(ctx: HostCtx): void {
             await workspace.detachSession(sid)
           }
         }
-        // 3) Chat-folder registry cleanup (best-effort; the folder itself
+        // 3) Best-effort pin cleanup. The pin set is registry-global, so a
+        //    deleted id would linger there forever; `unpinSession` is the
+        //    platform's own write (idempotent, and, unlike `pinSession`, it
+        //    checks no session existence — the log is already gone by now). A
+        //    dangling pin is inert (pin order derives its membership from the
+        //    live lists), so a failure warns instead of turning a completed
+        //    delete into a 500.
+        try {
+          await ctx.workspaceRegistry.unpinSession(sid)
+        } catch (err) {
+          console.warn('[dsh-chat-manager] pin cleanup failed:', errorMessage(err))
+        }
+        // 4) Chat-folder registry cleanup (best-effort; the folder itself
         //    stays on disk). Runs before the archive removal below, so an
         //    unexpected failure here also leaves the archive untouched.
         const entry = chatState.folders.get(sid)
@@ -583,7 +645,7 @@ function apply(ctx: HostCtx): void {
           chatState.folders.delete(sid)
           writeRegistry(path.dirname(entry.folder))
         }
-        // 4) Best-effort projection-cache cleanup. The platform's
+        // 5) Best-effort projection-cache cleanup. The platform's
         //    session_projcache domain has no prune path (rows are written
         //    once per session and never removed), so without this a deleted
         //    session's checkpoint would linger in the cache file forever.
@@ -596,7 +658,7 @@ function apply(ctx: HostCtx): void {
         } catch (err) {
           console.warn('[dsh-chat-manager] projection cache cleanup failed:', errorMessage(err))
         }
-        // 5) Un-archive LAST: every fallible step above has succeeded, so the
+        // 6) Un-archive LAST: every fallible step above has succeeded, so the
         //    archive set only changes on a fully successful delete. A failure
         //    anywhere before this point 500s and leaves the archive intact
         //    (a broken delete can never resurrect the session into a list).

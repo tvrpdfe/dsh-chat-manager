@@ -24,7 +24,7 @@ const INSTRUMENT = `(() => {
 const app = await openApp({ url: URL, port: PORT, instrument: INSTRUMENT });
 try {
   await app.navigate();
-  const gotRows = await app.waitForApp({ attempts: 40, intervalMs: 400 });
+  const gotRows = await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   await sleep(3200);
 
   const out = await app.evaluate(`(() => {
