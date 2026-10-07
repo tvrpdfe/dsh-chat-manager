@@ -40,7 +40,7 @@ import { ProjectRowItem, SearchResultItem, SessionNodeItem } from './Rows.tsx'
 import { AnimatedRows } from './AnimatedRows.tsx'
 import { FLAT_SESSION_ORDER_KEY, type SessionGroupBy } from '../stores.ts'
 import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
-import { ChatSection } from '../addon/ChatSection.tsx'
+import { ChatSection, type ChatSearchHits } from '../addon/ChatSection.tsx'
 import { deletedIdsSource, pruneDeletedIds, runChatFlow, setChatRuntimeSnapshot } from '../addon/chat-runtime.ts'
 import { isUnderChatRoot } from '../../shared/paths.ts'
 import css from './WorkspaceBrowser.module.css'
@@ -962,6 +962,46 @@ export function WorkspaceBrowser({
       workspaces: workspaces.map(workspace => ({ path: workspace.path, workspaceId: workspace.workspaceId })),
     })
   }, [mainSessionId, chatSessionIds, workspaces])
+  // The chat pane's search state lives here, beside the workspace search above
+  // and for the same reason: the pane leaves the tree while the rail is
+  // collapsed, so its query, expansion, hits, and in-flight flag have to
+  // outlive it. Hits carry the query that produced them — a newer query must
+  // not ride the previous query's rows while its own search is in flight.
+  const [chatQuery, setChatQueryState] = useState('')
+  const [chatSearchExpanded, setChatSearchExpanded] = useState(false)
+  const [chatSearching, setChatSearching] = useState(false)
+  const [chatHits, setChatHits] = useState<ChatSearchHits>({ query: '', items: [] })
+  const normalizedChatQuery = sanitizeSearchQuery(chatQuery).trim().toLowerCase()
+  // Upstream keys its remote results the same way (`remote.query === query`) and
+  // reads anything else as still loading. Without that, the debounce window of a
+  // new query would show "no matches" for its own rows.
+  const chatSearchPending = chatSearching
+    || (normalizedChatQuery !== '' && chatHits.query !== normalizedChatQuery)
+  const setChatQuery = (value: string): void => { setChatQueryState(sanitizeSearchQuery(value)) }
+  useEffect(() => {
+    if (normalizedChatQuery === '') {
+      setChatHits({ query: '', items: [] })
+      setChatSearching(false)
+      return
+    }
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      setChatSearching(true)
+      chatSearch(normalizedChatQuery).then((items) => {
+        if (cancelled) return
+        setChatHits({ query: normalizedChatQuery, items: Array.isArray(items) ? items : [] })
+        setChatSearching(false)
+      }).catch(() => {
+        if (cancelled) return
+        setChatHits({ query: normalizedChatQuery, items: [] })
+        setChatSearching(false)
+      })
+    }, SEARCH_DEBOUNCE_MS)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [normalizedChatQuery, chatSearch])
   const splitRef = useRef<HTMLDivElement | null>(null)
   const [splitRatio, setSplitRatio] = useState(0.5)
   // The divider drags the workspace/chat boundary; each side keeps room for its
@@ -1522,13 +1562,20 @@ export function WorkspaceBrowser({
               useSessionStatus={useSessionStatus}
               useWorkspaces={useWorkspaces}
               useChat={useChat}
+              usePanelInfo={usePanelInfo}
               renderSlot={renderSlot}
               currentId={mainSessionId}
               deletedSessionIds={deletedIds}
               open={guardedOpen}
               onRenameRequest={requestSessionRename}
               onNewChat={() => { runChatFlow(startChat) }}
-              searchChats={chatSearch}
+              query={chatQuery}
+              normalizedQuery={normalizedChatQuery}
+              searchExpanded={chatSearchExpanded}
+              searching={chatSearchPending}
+              hits={chatHits}
+              setQuery={setChatQuery}
+              setSearchExpanded={setChatSearchExpanded}
               t={t}
             />
           </div>

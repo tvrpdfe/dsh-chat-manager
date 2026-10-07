@@ -1,5 +1,5 @@
 diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\index.ts" "b/F:\\workdir\\dsh-chat-manager\\src\\client\\index.ts"
-index cdf3214..b96e2a7 100644
+index cdf3214..c36fc5c 100644
 --- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\index.ts"
 +++ "b/F:\\workdir\\dsh-chat-manager\\src\\client\\index.ts"
 @@ -15,4 +15,9 @@
@@ -68,7 +68,7 @@ index cdf3214..b96e2a7 100644
 +
  /**
   * Required services (cordis fiber inject). The target slots are declared by
-@@ -119,6 +142,14 @@ export function apply(ctx: Context): void {
+@@ -119,6 +142,33 @@ export function apply(ctx: Context): void {
      ctx, ctx.remote.directoryPicker, workspaces, sessions, viewInstance.actions, notify,
    )
 -  ctx.slots.provideRoot({ hooks: { workspaces: workspaces.list } })
@@ -82,9 +82,28 @@ index cdf3214..b96e2a7 100644
 +  // archived page plus the chat pane read the plugin's own chat state.
 +  setRefreshSessions(() => { void sessions.refresh() })
 +  void refreshChatState().catch(() => {})
++  // `refreshChatState` already retries a few times, but a page whose boot pull
++  // failed outright would otherwise keep `root: null` for its whole life: chat
++  // Sessions would show up in the workspace area, the chat pane would stay
++  // empty, and a no-argument New Session would treat a chat Session as a
++  // workspace one. Coming back to such a page re-pulls once, which needs no
++  // polling and no timer.
++  const recoverChatState = (): void => {
++    if (document.visibilityState === 'hidden') return
++    if (chatStateSource.getSnapshot().root !== null) return
++    void refreshChatState().catch(() => {})
++  }
++  ctx.effect(() => {
++    window.addEventListener('focus', recoverChatState)
++    document.addEventListener('visibilitychange', recoverChatState)
++    return () => {
++      window.removeEventListener('focus', recoverChatState)
++      document.removeEventListener('visibilitychange', recoverChatState)
++    }
++  }, 'dsh-chat-manager: chat state recovery')
    const shortcutControls = createWorkspaceShortcutControls()
  
-@@ -229,4 +260,51 @@ export function apply(ctx: Context): void {
+@@ -229,4 +279,51 @@ export function apply(ctx: Context): void {
      showArchived: () => { viewInstance.actions.setArchivedFilter('show') },
    })
 +  // ---- dsh-chat-manager RPC helpers ----
@@ -136,7 +155,7 @@ index cdf3214..b96e2a7 100644
 +
    const browserInjected = (): WorkspaceBrowserInjected => ({
      // Explicit group actions keep their target; unscoped New Session inherits
-@@ -250,5 +328,13 @@ export function apply(ctx: Context): void {
+@@ -250,5 +347,13 @@ export function apply(ctx: Context): void {
      setDirectoryBusy: shortcutControls.directoryBusy,
      dismissForkError: shortcutControls.dismissForkError,
 -    hooks: { directoryFlow: browserFlowSource, hostInfo, workspaceShortcuts: shortcutControls.state, shortcuts: ctx.shortcuts.catalog },
@@ -151,7 +170,7 @@ index cdf3214..b96e2a7 100644
 +    },
    })
    const pickerInjected = (): WorkspacePickerInjected => ({
-@@ -256,4 +342,18 @@ export function apply(ctx: Context): void {
+@@ -256,4 +361,18 @@ export function apply(ctx: Context): void {
      hooks: { directoryFlow: pickerFlowSource },
    })
 +  // Plugin action: the delete confirmation. One request store is shared by the
@@ -170,13 +189,13 @@ index cdf3214..b96e2a7 100644
 +  })
    // Each registration declares its owned children in the same call; slot
    // injection follows both the owner and declaration HMR lifetimes.
-@@ -288,4 +388,5 @@ export function apply(ctx: Context): void {
+@@ -288,4 +407,5 @@ export function apply(ctx: Context): void {
      yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'fork', order: 300, locale: NS, inject: forkInjected }, ForkSessionMenuItem)
      yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'archive', order: 400, locale: NS, inject: archiveInjected }, ArchiveSessionMenuItem)
 +    yield ctx.slots.register({ name: 'sidebar.workspaces.session.menu.item', id: 'delete', order: 500, locale: NS, inject: deleteInjected }, DeleteSessionMenuItem)
    })
    ctx.slots.inject('sidebar.workspaces.session.row.action', function* () {
-@@ -307,4 +408,7 @@ export function apply(ctx: Context): void {
+@@ -307,4 +427,7 @@ export function apply(ctx: Context): void {
        name: 'shell.overlay', id: 'workspace.row-toast', locale: NS, store: viewStore, inject: rowToastInjected,
      }, RowActionToast)
 +    yield ctx.slots.register({
@@ -184,7 +203,7 @@ index cdf3214..b96e2a7 100644
 +    }, SessionDeleteConfirmDialog)
    })
    ctx.slots.inject('conversation.hero.workspace', () => ctx.slots.register(
-@@ -317,4 +421,20 @@ export function apply(ctx: Context): void {
+@@ -317,4 +440,20 @@ export function apply(ctx: Context): void {
      WorkspacePicker,
    ))
 +  // New Session routing: a workspace-focused Session keeps the shipped
@@ -205,7 +224,7 @@ index cdf3214..b96e2a7 100644
 +  }, ArchivedSessionsPage))
  }
  
-@@ -329,2 +449,21 @@ function activeSessionRefusal(reason: unknown): readonly SessionActivity[] | und
+@@ -329,2 +468,21 @@ function activeSessionRefusal(reason: unknown): readonly SessionActivity[] | und
    return rpcError.code === 'workspace/session-active' ? rpcError.details.activity : undefined
  }
 +

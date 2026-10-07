@@ -5,19 +5,26 @@
  * the workspace lists, filtered to the chat root, and carry the same slot-driven
  * row menu — pin, rename, fork, archive, and the plugin's delete.
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import clsx from 'clsx'
 import {
   IconCloseFillRegular, IconPlusOutlineRegular, IconSearchOutlineRegular, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import { SessionNodeItem } from '../rows/Rows.tsx'
 import css from '../rows/WorkspaceBrowser.module.css'
-import { SEARCH_DEBOUNCE_MS, SEARCH_QUERY_MAX_CODE_UNITS, sanitizeSearchQuery } from '../rows/WorkspaceBrowser.tsx'
+import { SEARCH_QUERY_MAX_CODE_UNITS } from '../rows/WorkspaceBrowser.tsx'
 import { deriveFlat, visibleSessionIds, type SessionRowState } from '../tree.ts'
 import { isUnderChatRoot } from '../../shared/paths.ts'
 import type { ChatSearchHit } from '../../shared/chat.ts'
 import type { WorkspaceBrowserProps } from '../contract/slots.ts'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+
+/** Content hits bound to the query that produced them (never a newer query's). */
+export interface ChatSearchHits {
+  /** The normalized query these hits answer. */
+  query: string
+  items: readonly ChatSearchHit[]
+}
 
 interface ChatSectionProps {
   wide: boolean
@@ -29,6 +36,8 @@ interface ChatSectionProps {
   useWorkspaces: WorkspaceBrowserProps['useWorkspaces']
   /** Plugin-injected hook over the chat-folder state source. */
   useChat: WorkspaceBrowserProps['useChat']
+  /** Global standard hook over the sidebar panel state, as the workspace lists read it. */
+  usePanelInfo: WorkspaceBrowserProps['usePanelInfo']
   /** Child-seat renderer for the row action lists, shared with the workspace rows. */
   renderSlot: WorkspaceBrowserProps['renderSlot']
   /** The main-view Session (blank rows stay visible only for it). */
@@ -38,7 +47,20 @@ interface ChatSectionProps {
   /** Open the shared rename dialog from a row title double-click. */
   onRenameRequest: (sessionId: SessionId, currentTitle: string) => void
   onNewChat: () => void
-  searchChats: (query: string) => Promise<ChatSearchHit[]>
+  /**
+   * Search state owned by the persistent browser body: the pane itself leaves
+   * the tree while the rail is collapsed, so its query, expansion, hits and
+   * in-flight flag have to outlive it.
+   */
+  query: string
+  /** The sanitized, lower-cased query the pane filters and keys hits by. */
+  normalizedQuery: string
+  searchExpanded: boolean
+  searching: boolean
+  hits: ChatSearchHits
+  /** Sanitize and store the query (the input's own bounds/escape/clear paths all land here). */
+  setQuery: (value: string) => void
+  setSearchExpanded: (expanded: boolean) => void
   t: WorkspaceBrowserProps['t']
 }
 
@@ -46,12 +68,14 @@ interface ChatSectionProps {
  * The chat pane: header (label + expandable search + add chat), then the chat
  * list. Archived Sessions and plugin tombstones leave through the same
  * visibility rules the workspace lists use, and membership is the chat root.
- * @param props - hook seats, the shared row-action renderer, and the pane copy.
+ * @param props - hook seats, the shared row-action renderer, the hoisted search
+ *   state, and the pane copy.
  * @returns the pane, or null while the rail is collapsed.
  */
 export function ChatSection({
-  wide, useSessions, useSessionStatus, useWorkspaces, useChat, renderSlot, currentId,
-  deletedSessionIds, open, onRenameRequest, onNewChat, searchChats, t,
+  wide, useSessions, useSessionStatus, useWorkspaces, useChat, usePanelInfo, renderSlot, currentId,
+  deletedSessionIds, open, onRenameRequest, onNewChat, query, normalizedQuery, searchExpanded,
+  searching, hits, setQuery, setSearchExpanded, t,
 }: ChatSectionProps) {
   const list = useSessions(s => s)
   const statuses = useSessionStatus(s => s)
@@ -59,13 +83,12 @@ export function ChatSection({
   const pinnedSessionIds = useWorkspaces(s => s.pinnedSessionIds)
   const chat = useChat(s => s)
   const chatRoot: string | null = typeof chat?.root === 'string' ? chat.root : null
-  const [query, setQuery] = useState('')
-  const [searchExpanded, setSearchExpanded] = useState(false)
-  const [hits, setHits] = useState<ChatSearchHit[]>([])
-  const [searching, setSearching] = useState(false)
+  // Row selection drops while a panel is open, exactly as in the workspace
+  // lists: with both panes visible they must agree on the selected row.
+  const panelActive = usePanelInfo(info => info.activePanelId !== null)
+  const rowCurrentId = panelActive ? undefined : currentId
   const searchRootRef = useRef<HTMLDivElement | null>(null)
   const searchInputRef = useRef<HTMLInputElement | null>(null)
-  const normalizedQuery = sanitizeSearchQuery(query).trim().toLowerCase()
 
   // Chat membership plus the shipped visibility rules: archived rows follow the
   // default hide-archived view, blank rows only survive as the current Session,
@@ -88,34 +111,14 @@ export function ChatSection({
       if (node.title === '') continue
       if (node.title.toLowerCase().includes(normalizedQuery)) matchedIds.add(node.id)
     }
-    for (const hit of hits) matchedIds.add(hit.sessionId)
+    // Content hits count only for the query that produced them: while a newer
+    // query's search is still in flight, the previous query's rows must not
+    // ride along under it.
+    if (hits.query === normalizedQuery) {
+      for (const hit of hits.items) matchedIds.add(hit.sessionId)
+    }
     return chatNodes.filter(node => matchedIds.has(node.id))
   }, [normalizedQuery, chatNodes, hits])
-
-  useEffect(() => {
-    if (normalizedQuery === '') {
-      setHits([])
-      setSearching(false)
-      return
-    }
-    let cancelled = false
-    const timer = window.setTimeout(() => {
-      setSearching(true)
-      searchChats(normalizedQuery).then((items) => {
-        if (cancelled) return
-        setHits(Array.isArray(items) ? items : [])
-        setSearching(false)
-      }).catch(() => {
-        if (cancelled) return
-        setHits([])
-        setSearching(false)
-      })
-    }, SEARCH_DEBOUNCE_MS)
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-  }, [normalizedQuery, searchChats])
 
   useEffect(() => {
     if (!wide || !searchExpanded) return
@@ -167,7 +170,7 @@ export function ChatSection({
               maxLength={SEARCH_QUERY_MAX_CODE_UNITS}
               value={query}
               tabIndex={searchExpanded ? 0 : -1}
-              onChange={(e) => { setQuery(sanitizeSearchQuery(e.target.value)) }}
+              onChange={(e) => { setQuery(e.target.value) }}
               onKeyDown={(e) => {
                 if (e.key !== 'Escape') return
                 setQuery('')
@@ -214,7 +217,7 @@ export function ChatSection({
             <SessionNodeItem
               key={node.id}
               node={node}
-              currentId={currentId}
+              currentId={rowCurrentId}
               now={now}
               onOpen={open}
               onRenameRequest={onRenameRequest}

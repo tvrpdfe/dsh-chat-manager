@@ -85,12 +85,13 @@ export function markArchivedMasked(sessionId: string): void {
   archivedMaskSource.set(new Set(archivedMaskSource.getSnapshot()).add(sessionId))
 }
 
-/**
- * Re-pull `/api/chat-manager/state` into the chat state source.
- * Resolves with the refreshed snapshot; rejects with the fetch/parse failure
- * (callers that only want a best-effort refresh must `.catch(() => {})`).
- */
-export function refreshChatState(): Promise<ChatManagerState> {
+/** Attempt budget for one state pull: the first try plus two retries. */
+const STATE_PULL_ATTEMPTS = 3
+/** Backoff before the next attempt: 500ms after the first failure, 1000ms after the second. */
+const STATE_PULL_BACKOFF_MS = [500, 1000]
+
+/** One state pull: fetch, project, and commit the snapshot into the state source. */
+function requestChatState(): Promise<ChatManagerState> {
   return fetch('/api/chat-manager/state')
     .then((res) => { if (!res.ok) throw new Error(`state request failed (${res.status})`); return res.json() })
     .then((data: { dshRoot?: unknown; folders?: unknown; archived?: unknown }) => {
@@ -111,10 +112,34 @@ export function refreshChatState(): Promise<ChatManagerState> {
       chatStateSource.set(snapshot)
       return snapshot
     })
-    .catch((err: unknown) => {
-      chatStateSource.update((current) => ({ ...current, loaded: true }))
-      throw err
-    })
+}
+
+/**
+ * Re-pull `/api/chat-manager/state` into the chat state source, within a
+ * bounded retry budget (one attempt per {@link STATE_PULL_ATTEMPTS}, waiting
+ * {@link STATE_PULL_BACKOFF_MS} in between — never a long-lived poll).
+ *
+ * A single transient failure would otherwise leave `root` null for the life of
+ * the page: chat Sessions would surface in the workspace area, the chat pane
+ * would stay empty, and the no-argument New Session route would treat a chat
+ * Session as a workspace one. Resolves with the refreshed snapshot; rejects
+ * with the LAST fetch/parse failure (callers that only want a best-effort
+ * refresh must `.catch(() => {})`), and marks the state loaded either way.
+ */
+export function refreshChatState(): Promise<ChatManagerState> {
+  const attempt = async (index: number): Promise<ChatManagerState> => {
+    try {
+      return await requestChatState()
+    } catch (err) {
+      if (index + 1 >= STATE_PULL_ATTEMPTS) throw err
+      await new Promise<void>((resolve) => { window.setTimeout(resolve, STATE_PULL_BACKOFF_MS[index]) })
+      return await attempt(index + 1)
+    }
+  }
+  return attempt(0).catch((err: unknown) => {
+    chatStateSource.update((current) => ({ ...current, loaded: true }))
+    throw err
+  })
 }
 
 /** POST one JSON payload to a same-origin plugin route; rejects with the host error text. */
@@ -236,6 +261,7 @@ export const chatManagerZh = {
   'archived.delete': '删除',
   'archived.deleting': '删除中…',
   'archived.untitled': '未命名会话',
+  'archived.workspacePrefix': '{name}：',
   'archived.delete.desc': '将删除会话“{name}”的聊天记录。其文件夹会保留在磁盘上。此操作不可撤销。',
   'close': '关闭',
   'cancel': '取消',
@@ -256,6 +282,7 @@ export const chatManagerEn = {
   'archived.delete': 'Delete',
   'archived.deleting': 'Deleting…',
   'archived.untitled': 'Untitled session',
+  'archived.workspacePrefix': '{name}: ',
   'archived.delete.desc': 'This deletes the conversation record of “{name}”. Its folder is kept on disk. This cannot be undone.',
   'close': 'Close',
   'cancel': 'Cancel',

@@ -41,7 +41,7 @@ _Avoid_: 移除会话、清理会话
 _Avoid_: 聊天目录变量、CHAT_HOME
 
 **可预置性（provisionability）/ 预置（write grant）**：
-Windows 上 DSH 的 `workspace-write` 沙箱在会话第一次受限工具调用时，给**工作区根**（聊天会话即日期文件夹）写入常驻 DACL 授权与 Low 完整性标签——这要求该目录上有有效的 `WRITE_DAC` 与 `WRITE_OWNER`。卷根 ACL 缺 `CREATOR OWNER` 项时（如搬移到 `E:\` 的"文档"目录），新建文件夹只继承 `Authenticated Users: Modify`（不含这两项权利），于是预置失败、第一次工具调用报 `grantWrite(...)` 权限错误。插件读一遍 `icacls` 清单：该账户自己的（含继承的）完全控制项即算"已可预置"、不写；只在缺失时补一条**显式、非继承**的当前用户完全控制 ACE（非继承是为了不把该账户的完全控制写遍整棵聊天文件夹），并回读确认；读到该账户自己的 deny（含 `F`/`WO`/`WD`）或回读不确认都如实报失败。
+Windows 上 DSH 的 `workspace-write` 沙箱在会话第一次受限工具调用时，给**工作区根**（聊天会话即日期文件夹）写入常驻 DACL 授权与 Low 完整性标签——这要求该目录上有有效的 `WRITE_DAC` 与 `WRITE_OWNER`。卷根 ACL 缺 `CREATOR OWNER` 项时（如搬移到 `E:\` 的"文档"目录），新建文件夹只继承 `Authenticated Users: Modify`（不含这两项权利），于是预置失败、第一次工具调用报 `grantWrite(...)` 权限错误。插件把该文件夹的**安全描述符本身**读回来（`icacls /save` 的 SDDL：ACE 用 SID 与权利表示，SACL 段切掉；身份取自 `whoami /user` + `whoami /groups`，全 ASCII，与代码页和账户名是否非 ASCII 无关），按 **ACE 顺序**对该账户令牌做一次访问判定：**deny 只要 trustee 在令牌的 SID 集合里就适用于我们**（组 deny 是真阻断），而**只有本账户自己的 SID 能证明"已可预置"**——组 allow 可能是过滤令牌里的 deny-only 成员，不作数，代价是"完全控制只经组到手"的文件夹仍会补一条自己的 ACE（只写一次，之后即跳过；这是有意的保守方向）。已可预置就不写；否则补一条**显式、非继承**的当前用户完全控制 ACE（非继承是为了不把该账户的完全控制写遍整棵聊天文件夹），再回读确认。**别的 trustee 的显式 deny（组/Everyone 的完全拒绝）压不过 ⇒ 不写、如实报失败并点名那个 SID**；读失败或读不懂（NULL DACL、字段残缺）一律 fail-closed、绝不改写。**看得见的边界**：ACL 之外的授权来源（令牌特权、完整性标签、`whoami /groups` 不列出的令牌 SID）、目录**所有者**身份（未单独探测，但它对本检查关心的两项权利是冗余的——DSH 要求"所有者 + `WRITE_OWNER`"是因为所有者隐式持有 `WRITE_DAC`，而这里直接验证 DACL 已把 `WRITE_DAC` 与 `WRITE_OWNER` 都授予本账户）、以及 SDDL 里展不开的 trustee（占位符 `CO`/`CG`、代表对象所有者的 `OW`、域名相对缩写**按"可能挡住"处理**——宁可不修也不假绿灯）；身份只解析一次且必须完整：`whoami` 失败、超时、或**给不出可用的组列表**（空，或除完整性标签外一个都不剩）⇒ 本次进程内按身份不可用处理，绝不用一个丢了组的令牌判"已可预置"。
 _Avoid_: 权限修复、ACL 授权、沙箱授权
 
 **已归档会话栏目**：

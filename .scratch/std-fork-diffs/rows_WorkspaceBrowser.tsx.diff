@@ -1,5 +1,5 @@
 diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\rows\\WorkspaceBrowser.tsx" "b/F:\\workdir\\dsh-chat-manager\\src\\client\\rows\\WorkspaceBrowser.tsx"
-index 3c900b2..4799ec4 100644
+index 3c900b2..5588643 100644
 --- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\rows\\WorkspaceBrowser.tsx"
 +++ "b/F:\\workdir\\dsh-chat-manager\\src\\client\\rows\\WorkspaceBrowser.tsx"
 @@ -15,5 +15,5 @@
@@ -12,7 +12,7 @@ index 3c900b2..4799ec4 100644
 @@ -41,4 +41,7 @@ import { AnimatedRows } from './AnimatedRows.tsx'
  import { FLAT_SESSION_ORDER_KEY, type SessionGroupBy } from '../stores.ts'
  import { WorkspacePickFlow } from '../WorkspacePicker.tsx'
-+import { ChatSection } from '../addon/ChatSection.tsx'
++import { ChatSection, type ChatSearchHits } from '../addon/ChatSection.tsx'
 +import { deletedIdsSource, pruneDeletedIds, runChatFlow, setChatRuntimeSnapshot } from '../addon/chat-runtime.ts'
 +import { isUnderChatRoot } from '../../shared/paths.ts'
  import css from './WorkspaceBrowser.module.css'
@@ -120,7 +120,7 @@ index 3c900b2..4799ec4 100644
 +  startChat,
    useShortcuts,
    useWorkspaceShortcuts,
-@@ -914,8 +926,67 @@ export function WorkspaceBrowser({
+@@ -914,8 +926,107 @@ export function WorkspaceBrowser({
      ? mainSessionId
      : undefined
 +  // ---- dsh-chat-manager: chat root, tombstones, and split state ----
@@ -160,6 +160,46 @@ index 3c900b2..4799ec4 100644
 +      workspaces: workspaces.map(workspace => ({ path: workspace.path, workspaceId: workspace.workspaceId })),
 +    })
 +  }, [mainSessionId, chatSessionIds, workspaces])
++  // The chat pane's search state lives here, beside the workspace search above
++  // and for the same reason: the pane leaves the tree while the rail is
++  // collapsed, so its query, expansion, hits, and in-flight flag have to
++  // outlive it. Hits carry the query that produced them — a newer query must
++  // not ride the previous query's rows while its own search is in flight.
++  const [chatQuery, setChatQueryState] = useState('')
++  const [chatSearchExpanded, setChatSearchExpanded] = useState(false)
++  const [chatSearching, setChatSearching] = useState(false)
++  const [chatHits, setChatHits] = useState<ChatSearchHits>({ query: '', items: [] })
++  const normalizedChatQuery = sanitizeSearchQuery(chatQuery).trim().toLowerCase()
++  // Upstream keys its remote results the same way (`remote.query === query`) and
++  // reads anything else as still loading. Without that, the debounce window of a
++  // new query would show "no matches" for its own rows.
++  const chatSearchPending = chatSearching
++    || (normalizedChatQuery !== '' && chatHits.query !== normalizedChatQuery)
++  const setChatQuery = (value: string): void => { setChatQueryState(sanitizeSearchQuery(value)) }
++  useEffect(() => {
++    if (normalizedChatQuery === '') {
++      setChatHits({ query: '', items: [] })
++      setChatSearching(false)
++      return
++    }
++    let cancelled = false
++    const timer = window.setTimeout(() => {
++      setChatSearching(true)
++      chatSearch(normalizedChatQuery).then((items) => {
++        if (cancelled) return
++        setChatHits({ query: normalizedChatQuery, items: Array.isArray(items) ? items : [] })
++        setChatSearching(false)
++      }).catch(() => {
++        if (cancelled) return
++        setChatHits({ query: normalizedChatQuery, items: [] })
++        setChatSearching(false)
++      })
++    }, SEARCH_DEBOUNCE_MS)
++    return () => {
++      cancelled = true
++      window.clearTimeout(timer)
++    }
++  }, [normalizedChatQuery, chatSearch])
 +  const splitRef = useRef<HTMLDivElement | null>(null)
 +  const [splitRatio, setSplitRatio] = useState(0.5)
 +  // The divider drags the workspace/chat boundary; each side keeps room for its
@@ -190,7 +230,7 @@ index 3c900b2..4799ec4 100644
 +  }, [list, workspaces, excludedSessionIds])
    const orderState = useMemo(
      () => ({ pinnedSessionIds, archivedSessionIds }),
-@@ -926,5 +997,8 @@ export function WorkspaceBrowser({
+@@ -926,5 +1037,8 @@ export function WorkspaceBrowser({
      [orderState, archivedFilter],
    )
 -  const flatMemberIds = useMemo(() => sessionMemberIds(list), [list])
@@ -200,7 +240,7 @@ index 3c900b2..4799ec4 100644
 +  )
    const orderedWorkspaces = useMemo(() => workspaces.map((workspace) => {
      const memberIds = workspace.sessionIds
-@@ -940,4 +1014,12 @@ export function WorkspaceBrowser({
+@@ -940,4 +1054,12 @@ export function WorkspaceBrowser({
      }
    }), [currentBlank, list.byId, orderBy, orderState, sessionOrderByAccount, workspaces])
 +  // The date-folder Workspaces the chat flow creates are chat accounting, not
@@ -213,7 +253,7 @@ index 3c900b2..4799ec4 100644
 +  )
    const orderedUngroupedSessionIds = useMemo(() => {
      const baseOrder = orderBy === 'updated'
-@@ -968,7 +1050,13 @@ export function WorkspaceBrowser({
+@@ -968,7 +1090,13 @@ export function WorkspaceBrowser({
        UNGROUPED_KEY,
        FLAT_SESSION_ORDER_KEY,
 -      ...workspaces.map(workspace => workspace.workspaceId),
@@ -229,7 +269,7 @@ index 3c900b2..4799ec4 100644
 +  }, [actions.retainAccountKeys, workspacePhase, workspaces, chatRoot])
    useEffect(() => {
      if (list.phase !== 'ready' || workspaceReady || orderBy !== 'manual' || currentBlank === undefined) return
-@@ -1339,84 +1427,114 @@ export function WorkspaceBrowser({
+@@ -1339,84 +1467,121 @@ export function WorkspaceBrowser({
        </div>}
  
 -      {/* Always-mounted seat keeps the region's flex slot while the list
@@ -343,13 +383,20 @@ index 3c900b2..4799ec4 100644
 -              resultLimit={searchResultLimit}
 +              useWorkspaces={useWorkspaces}
 +              useChat={useChat}
++              usePanelInfo={usePanelInfo}
 +              renderSlot={renderSlot}
 +              currentId={mainSessionId}
 +              deletedSessionIds={deletedIds}
 +              open={guardedOpen}
 +              onRenameRequest={requestSessionRename}
 +              onNewChat={() => { runChatFlow(startChat) }}
-+              searchChats={chatSearch}
++              query={chatQuery}
++              normalizedQuery={normalizedChatQuery}
++              searchExpanded={chatSearchExpanded}
++              searching={chatSearchPending}
++              hits={chatHits}
++              setQuery={setChatQuery}
++              setSearchExpanded={setChatSearchExpanded}
                t={t}
              />
 -          )

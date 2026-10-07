@@ -151,6 +151,25 @@ export function apply(ctx: Context): void {
   // archived page plus the chat pane read the plugin's own chat state.
   setRefreshSessions(() => { void sessions.refresh() })
   void refreshChatState().catch(() => {})
+  // `refreshChatState` already retries a few times, but a page whose boot pull
+  // failed outright would otherwise keep `root: null` for its whole life: chat
+  // Sessions would show up in the workspace area, the chat pane would stay
+  // empty, and a no-argument New Session would treat a chat Session as a
+  // workspace one. Coming back to such a page re-pulls once, which needs no
+  // polling and no timer.
+  const recoverChatState = (): void => {
+    if (document.visibilityState === 'hidden') return
+    if (chatStateSource.getSnapshot().root !== null) return
+    void refreshChatState().catch(() => {})
+  }
+  ctx.effect(() => {
+    window.addEventListener('focus', recoverChatState)
+    document.addEventListener('visibilitychange', recoverChatState)
+    return () => {
+      window.removeEventListener('focus', recoverChatState)
+      document.removeEventListener('visibilitychange', recoverChatState)
+    }
+  }, 'dsh-chat-manager: chat state recovery')
   const shortcutControls = createWorkspaceShortcutControls()
 
   const searchSessions: WorkspaceBrowserInjected['searchSessions'] = async (query, signal) => {

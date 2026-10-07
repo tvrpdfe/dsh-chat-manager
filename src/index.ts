@@ -62,12 +62,24 @@ const CHAT_ROOT_OVERRIDE_ENV = 'DSH_CHAT_MANAGER_ROOT'
 
 /**
  * Wall-clock budget for the startup sweep that makes existing date folders
- * provisionable (`ensureWindowsFolderAccess` caps each `icacls` call on its
- * own). The sweep runs synchronously on the startup path, so a dead or very
- * slow volume must stop it rather than hold the Host's start indefinitely; a
- * skipped folder is healed later by the chat route when that day is used.
+ * provisionable. The deadline is handed to `ensureWindowsFolderAccess`, which
+ * starts no further `icacls` call once it is inside its own floor — so the pass
+ * is bounded by this budget plus that floor, not by one call's cap multiplied
+ * by the calls one folder needs. The sweep runs synchronously on the startup
+ * path, so a dead or very slow volume must stop it rather than hold the Host's
+ * start indefinitely; a skipped folder is healed later by the chat route when
+ * that day is used.
  */
 const CHAT_FOLDER_SWEEP_BUDGET_MS = 30_000
+
+/**
+ * Wall-clock budget for the same check on the `ensure-date-folder` route. It is
+ * reached by a user action (opening a new chat), and the check is synchronous,
+ * so a slow volume must not block that one request through all of the calls a
+ * check can make: one call's cap is the whole budget here. A folder that cannot
+ * be checked in time still gets the ACE on a later start or chat.
+ */
+const CHAT_FOLDER_ROUTE_BUDGET_MS = 10_000
 
 /** Workspace-item shape read from the registry (leaf fields only). */
 interface WorkspaceView {
@@ -511,11 +523,11 @@ function apply(ctx: HostCtx): void {
         // grantWrite(<dateFolder>)`. Make the folder provisionable BEFORE any
         // session can start in it. Best-effort: no ACE is needed at all under
         // `danger-full-access`, so a failure reports instead of blocking.
-        const folderAccess = ensureWindowsFolderAccess(dateFolder)
+        const folderAccess = ensureWindowsFolderAccess(dateFolder, {
+          deadline: Date.now() + CHAT_FOLDER_ROUTE_BUDGET_MS,
+        })
         if (!folderAccess.ok) {
           console.warn(`[dsh-chat-manager] chat folder not provisionable: ${dateFolder} (${folderAccess.detail ?? 'unknown'})`)
-        } else if (folderAccess.detail !== undefined) {
-          console.warn(`[dsh-chat-manager] chat folder access unconfirmed: ${dateFolder} (${folderAccess.detail})`)
         }
         let workspace = await ctx.workspaceRegistry.resolveByPath(dateFolder)
         if (workspace === undefined) workspace = await ctx.workspaceRegistry.create(dateFolder)
@@ -798,10 +810,12 @@ function apply(ctx: HostCtx): void {
     // re-propagated over a large chat folder); a failure only warns, because
     // the ACE is unnecessary under `danger-full-access`.
     if (process.platform === 'win32' && dateFolders.length > 0) {
-      // The pass is synchronous (it runs on the startup path) and the helper
-      // caps each icacls call, so the whole sweep is bounded too: a dead or very
-      // slow volume must not hold the Host's startup indefinitely. An exhausted
-      // pass warns and stops; the chat route still heals today's folder on demand.
+      // The pass is synchronous (it runs on the startup path), so the deadline
+      // goes into the helper: it starts no further icacls call once its floor is
+      // reached, which bounds the pass by this budget plus that floor even when
+      // the volume stalls mid-folder. A dead or very slow volume must not hold
+      // the Host's startup indefinitely. An exhausted pass warns and stops; the
+      // chat route still heals today's folder on demand.
       const deadline = Date.now() + CHAT_FOLDER_SWEEP_BUDGET_MS
       let checked = 0
       let repaired = 0
@@ -813,7 +827,7 @@ function apply(ctx: HostCtx): void {
           break
         }
         checked += 1
-        const access = ensureWindowsFolderAccess(dateFolder)
+        const access = ensureWindowsFolderAccess(dateFolder, { deadline })
         if (!access.ok) {
           failed += 1
           console.warn(`[dsh-chat-manager] chat folder not provisionable: ${dateFolder} (${access.detail ?? 'unknown'})`)
@@ -832,8 +846,15 @@ function apply(ctx: HostCtx): void {
 }
 
 export { apply, inject, name }
-// Re-exported for the decision-table tests: this host cannot run the POSIX
-// branch (or a real icacls listing) under test, so `test/*.test.mjs` pins both
-// pure seams from the built bundle.
+// Re-exported for the decision-table tests and the ACL acceptance probe: this
+// host cannot run the POSIX branch (or a real icacls/ACL evaluation) under test,
+// so `test/*.test.mjs` pins the pure seams from the built bundle — the
+// session-removal plan, and the DACL reader/decision the Windows folder check
+// is built from — while `.scratch/accept11-acl-deny-shapes.mjs` drives
+// `ensureWindowsFolderAccess` itself (the same bundle the Host runs) against
+// real folders and DSH's own grant.
 export { planSessionArtifactRemoval }
-export { readPrincipalControl } from './win-folder-access.ts'
+export {
+  ensureWindowsFolderAccess, evaluateDacl, hasTokenGroups, parseDaclSddl, parseOwnSid, parseTokenSids,
+  pickSddlLine, planFolderAccess,
+} from './win-folder-access.ts'

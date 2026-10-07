@@ -84,7 +84,9 @@ export function ArchivedSessionsPage({ t }: ArchivedSessionsPageProps) {
       {visibleRows.map(row => (
         <div className={css.archivedRow} key={row.sessionId}>
           <span className={css.archivedTitle}>
-            {row.workspaceTitle.trim().length > 0 ? `${row.workspaceTitle}：` : ''}
+            {row.workspaceTitle.trim().length > 0
+              ? t('archived.workspacePrefix', { name: row.workspaceTitle })
+              : ''}
             {row.title.trim().length > 0 ? row.title : t('archived.untitled')}
           </span>
           <span className={css.archivedTime}>
