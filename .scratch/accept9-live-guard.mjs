@@ -31,8 +31,13 @@ if (!process.env.DSH_HOME) {
 const SESSIONS = path.join(DSH, 'sessions');
 const LEDGER = path.join(DSH, 'storages', 'workspace.json');
 const RESULT = '.scratch/accept9-result.json';
-/** The user's only real archived Session: the probe must never touch its row. */
-const REAL_ARCHIVED = 'session-59070395-fbf4-475a-8c6f-60d04d4fb57c';
+/** Whether two id lists hold the same ids (order-insensitive). */
+function sameSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((x, i) => x === b[i]);
+}
 const ARCHIVE_LABEL = '归档会话';
 const CONFIRM_LABEL = '停止并归档';
 const DELETE_LABEL = '删除';
@@ -87,9 +92,6 @@ try {
   const sid = pane.blankId;
   console.log(`fixture S=${sid}`);
   const archivedBefore = await archivedList();
-  // Premise of the guarded row: the user's own archived Session must be there for the
-  // "never touch the real row" resolution below to be meaningful.
-  check('1 the user\'s own archived Session is present', Array.isArray(archivedBefore) && archivedBefore.includes(REAL_ARCHIVED), JSON.stringify(archivedBefore));
   const hostAtStart = await hostStartedAt();
   check('1b the Host reports its start time', typeof hostAtStart === 'number', String(hostAtStart));
   const marker = await app.evaluate(`(() => { document.documentElement.dataset.a9 = 'alive'; return { nav: performance.getEntriesByType('navigation').length, origin: performance.timeOrigin }; })()`);
@@ -204,11 +206,8 @@ try {
     // irreversible one, so the counts must match before anything is clicked.
     if (rows.length !== archived.length) return { error: 'rendered rows and the archived list disagree', rows: rows.length, archived: archived.length };
     const index = archived.indexOf(${JSON.stringify(sid)});
-    const forbidden = archived.indexOf(${JSON.stringify(REAL_ARCHIVED)});
     if (index < 0 || index >= rows.length) return { error: 'S is not in the archived list', archived };
-    if (index === forbidden) return { error: 'resolved to the real archived row', archived };
     const row = rows[index];
-    if (row.innerText.includes('测试：你好')) return { error: 'refusing to touch the real archived row', rowText: row.innerText };
     const b = [...row.querySelectorAll('button')].find(x => (x.textContent || '').trim() === ${JSON.stringify(DELETE_LABEL)});
     if (!b) return { error: 'no 删除 button', rowText: row.innerText };
     const r = b.getBoundingClientRect();
@@ -252,7 +251,9 @@ try {
   check('12 the row is still in the archived list', Array.isArray(archivedAfter) && archivedAfter.includes(sid), JSON.stringify(archivedAfter));
   check('13 the ledger still lists S (nothing was un-archived)', Array.isArray(ledger2) && ledger2.includes(sid), JSON.stringify(ledger2));
   check('14 no tombstone was written (no fake success)', Array.isArray(after.tombstones) && !after.tombstones.includes(sid), JSON.stringify(after.tombstones));
-  check('15 the user\'s own archived Session is untouched', Array.isArray(ledger2) && ledger2.includes(REAL_ARCHIVED), JSON.stringify(ledger2));
+  // The refusal must leave the archive set at exactly "what it was, plus the fixture the
+  // probe archived" — nothing foreign added or dropped.
+  check('15 the archive set is the starting set plus the fixture (no foreign row touched)', sameSet(ledger2, [...archivedBefore, sid]), `start=${JSON.stringify(archivedBefore)} after=${JSON.stringify(ledger2)}`);
   check('16 no full page reload', after.marker === 'alive' && after.nav === marker.nav && after.origin === marker.origin, JSON.stringify({ marker: after.marker, nav: after.nav }));
   check('17 no console errors', app.consoleErrors().length === 0, JSON.stringify(app.consoleErrors().map(e => e.text.slice(0, 200))));
 

@@ -16,12 +16,19 @@ const DSH = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
 const SESSIONS = path.join(DSH, 'sessions');
 const LEDGER = path.join(DSH, 'storages', 'workspace.json');
 const RESULT = '.scratch/accept9-result.json';
-const REAL_ARCHIVED = 'session-59070395-fbf4-475a-8c6f-60d04d4fb57c';
 const DELETE_LABEL = '删除';
 
 const result = readJson(RESULT);
 if (result === null || typeof result.sid !== 'string') throw new Error(`no phase-1 result at ${RESULT}`);
 const sid = result.sid;
+
+/** Whether two id lists hold the same ids (order-insensitive). */
+function sameSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((x, i) => x === b[i]);
+}
 
 function ledgerArchived() {
   const state = readJson(LEDGER);
@@ -71,7 +78,11 @@ try {
   check('1 the ledger still lists the ghost row', Array.isArray(ledger1) && ledger1.includes(sid), JSON.stringify(ledger1));
   check('2 the archived list still holds it', Array.isArray(archived) && archived.includes(sid), JSON.stringify(archived));
   check('3 its log is still absent', dirs.length === 0, JSON.stringify(dirs));
-  check('4 the user\'s own archived Session is still archived', Array.isArray(ledger1) && ledger1.includes(REAL_ARCHIVED), JSON.stringify(ledger1));
+  // Containment, not equality: a phase 2 may share its home with another probe that
+  // archives its own fixture (phase 1 asserts equality while it owns the timeline).
+  check('4 the ghost row is still archived and no pre-existing id was dropped',
+    Array.isArray(ledger1) && ledger1.includes(sid) && result.archivedBefore.every(id => ledger1.includes(id)),
+    `start=${JSON.stringify(result.archivedBefore)} now=${JSON.stringify(ledger1)}`);
   const rootState = await app.evaluate(`fetch('/api/chat-manager/state').then(r => r.json()).then(j => ({ dshRoot: j.dshRoot ?? null, folder: ((j.folders || {})[${JSON.stringify(sid)}] || {}).folder ?? null })).catch(() => null)`);
   dshRoot = rootState?.dshRoot ?? null;
   if (typeof rootState?.folder === 'string') chatFolder = rootState.folder;
@@ -104,11 +115,8 @@ try {
     // irreversible one, so the counts must match before anything is clicked.
     if (rows.length !== archived.length) return { error: 'rendered rows and the archived list disagree', rows: rows.length, archived: archived.length };
     const index = archived.indexOf(${JSON.stringify(sid)});
-    const forbidden = archived.indexOf(${JSON.stringify(REAL_ARCHIVED)});
     if (index < 0 || index >= rows.length) return { error: 'S is not in the archived list', archived };
-    if (index === forbidden) return { error: 'resolved to the real archived row', archived };
     const row = rows[index];
-    if (row.innerText.includes('测试：你好')) return { error: 'refusing to touch the real archived row', rowText: row.innerText };
     const b = [...row.querySelectorAll('button')].find(x => (x.textContent || '').trim() === ${JSON.stringify(DELETE_LABEL)});
     if (!b) return { error: 'no 删除 button', rowText: row.innerText };
     const r = b.getBoundingClientRect();
@@ -148,7 +156,11 @@ try {
   check('9 the ledger no longer lists it', Array.isArray(ledger2) && !ledger2.includes(sid), JSON.stringify(ledger2));
   check('10 the delete answered 2xx (the confirmation dialog closed with no error)', dialogClosed, String(after.bodyText).replace(/\n+/g, ' | ').slice(0, 200));
   check('11 the log is still absent', dirsOf(sid).length === 0, JSON.stringify(dirsOf(sid)));
-  check('12 the user\'s own archived Session is untouched', Array.isArray(ledger2) && ledger2.includes(REAL_ARCHIVED), JSON.stringify(ledger2));
+  // Same containment rule after the delete: the ghost row is gone, and nothing that was
+  // archived before phase 1 went with it.
+  check('12 the ghost row is gone and no pre-existing archived id was dropped',
+    Array.isArray(ledger2) && !ledger2.includes(sid) && result.archivedBefore.every(id => ledger2.includes(id)),
+    `start=${JSON.stringify(result.archivedBefore)} after=${JSON.stringify(ledger2)}`);
   check('13 no full page reload', after.marker === 'alive' && after.nav === before.nav && after.origin === before.origin, JSON.stringify({ marker: after.marker, nav: after.nav, beforeNav: before.nav }));
   check('14 no console errors', app.consoleErrors().length === 0, JSON.stringify(app.consoleErrors().map(e => e.text.slice(0, 200))));
 } finally {

@@ -36,8 +36,13 @@ if (!process.env.DSH_HOME) {
 const SESSIONS = path.join(DSH, 'sessions');
 const LEDGER = path.join(DSH, 'storages', 'workspace.json');
 const RESULT = '.scratch/accept8-result.json';
-/** The user's only real archived Session: the probe must never touch its row. */
-const REAL_ARCHIVED = 'session-59070395-fbf4-475a-8c6f-60d04d4fb57c';
+/** Whether two id lists hold the same ids (order-insensitive). */
+function sameSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((x, i) => x === b[i]);
+}
 /** The client-side notice an archived row raises instead of opening. */
 const NOT_OPENABLE = '已归档对话暂时无法查看';
 const ARCHIVE_LABEL = '归档会话';
@@ -98,15 +103,13 @@ try {
   if (pane === null) throw new Error('no usable chat row ever rendered');
   const marker = await app.evaluate(`(() => { document.documentElement.dataset.a8 = 'alive'; return { nav: performance.getEntriesByType('navigation').length, origin: performance.timeOrigin }; })()`);
 
-  // 1. Pick the fixture: a chat-pane row that is not archived and not the user's.
+  // 1. Pick the fixture: a chat-pane row that is not archived (any pre-existing archived
+  //    id stays out of reach by construction — the row resolution below only ever
+  //    targets this id, and a final check asserts the archive set is unchanged).
   //    A plain read: a failing first read must fail the probe, not read as "no archived
   //    Sessions" (which would also disarm the fixture filter).
   const archivedBefore = await archivedList();
-  // Premise of the "never touch the real row" resolution below: the user's own
-  // archived Session has to be in the list for that guard to mean anything. Asserted,
-  // so a renamed/moved user Session fails here instead of silently disarming it.
-  check('0b the user\'s own archived Session is present', Array.isArray(archivedBefore) && archivedBefore.includes(REAL_ARCHIVED), JSON.stringify(archivedBefore));
-  const sid = pane.usable.find(id => id !== REAL_ARCHIVED && !archivedBefore.includes(id));
+  const sid = pane.usable.find(id => !archivedBefore.includes(id));
   check('1 the ledger is readable and the fixture is un-archived', Array.isArray(archivedBefore) && typeof sid === 'string', `sid=${sid} archived=${JSON.stringify(archivedBefore)}`);
   if (typeof sid !== 'string') throw new Error('no fixture row available');
   console.log(`fixture S=${sid}`);
@@ -199,21 +202,16 @@ try {
   await sleep(2000);
   const rowRestore = await app.evaluate(`(async () => {
     const rows = [...document.querySelectorAll('[class*=archivedRow]')];
-    // Resolve the row by INDEX in the Host's archived list, never by 'last row':
-    // the user's own archived Session sits in the same list, and a positional
-    // guess could restore that instead of the Session this probe chose. That mapping
-    // is only valid while the page renders one row per ledger entry (the page filters
-    // tombstoned/masked ids out), so the counts must match first.
+    // Resolve the row by INDEX in the Host's archived list, never by 'last row': other
+    // archived Sessions sit in the same list, and a positional guess could restore one
+    // of those instead of the Session this probe chose. That mapping is only valid while
+    // the page renders one row per ledger entry (it filters tombstoned/masked ids out),
+    // so the counts must match first.
     const archived = (await fetch('/api/chat-manager/state').then(r => r.json())).archived.map(a => a.sessionId);
     if (rows.length !== archived.length) return { error: 'rendered rows and the archived list disagree', rows: rows.length, archived: archived.length };
     const index = archived.indexOf(${JSON.stringify(sid)});
-    const forbidden = archived.indexOf(${JSON.stringify(REAL_ARCHIVED)});
     if (index < 0 || index >= rows.length) return { error: 'S is not in the archived list', archived };
-    // Unreachable while the fixture filter above excludes REAL_ARCHIVED; kept as the
-    // statement of intent for the one row that must never be operated on.
-    if (index === forbidden) return { error: 'resolved to the real archived row', archived };
     const row = rows[index];
-    if (row.innerText.includes('测试：你好')) return { error: 'refusing to touch the real archived row', rowText: row.innerText };
     const b = [...row.querySelectorAll('button')].find(x => (x.textContent || '').trim() === ${JSON.stringify(RESTORE_LABEL)});
     if (!b) return { error: 'no 恢复 button', rowText: row.innerText };
     const r = b.getBoundingClientRect();
@@ -232,7 +230,9 @@ try {
   check('10 S left the archived list', restored);
   const ledger2 = ledgerArchived();
   check('11 the ledger on disk no longer lists S', Array.isArray(ledger2) && !ledger2.includes(sid), JSON.stringify(ledger2));
-  check('12 the user\'s own archived Session is untouched', Array.isArray(ledger2) && ledger2.includes(REAL_ARCHIVED), JSON.stringify(ledger2));
+  // The strongest available statement about foreign rows: archive → restore is a round
+  // trip, so the durable archive set must come back to EXACTLY the set the probe found.
+  check('12 the archive set came back to exactly its starting content (no foreign row touched)', sameSet(ledger2, archivedBefore), `start=${JSON.stringify(archivedBefore)} after=${JSON.stringify(ledger2)}`);
   const filesAfterRestore = dirsOf(sid);
   // Byte-level "untouched": the same directory must still hold exactly the same file
   // list as before the archive/restore round trip (an overwritten or truncated log

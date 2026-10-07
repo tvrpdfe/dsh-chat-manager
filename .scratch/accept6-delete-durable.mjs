@@ -18,8 +18,13 @@ const PORT = Number(process.env.ACCEPT_CDP_PORT ?? 9399);
 const DSH = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
 const SESSIONS = path.join(DSH, 'sessions');
 const RESULT = '.scratch/accept6-result.json';
-/** The user's only real archived Session: the probe must never touch its row. */
-const REAL_ARCHIVED = 'session-59070395-fbf4-475a-8c6f-60d04d4fb57c';
+/** Whether two id lists hold the same ids (order-insensitive). */
+function sameSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((x, i) => x === b[i]);
+}
 
 /** Every session directory on disk, as `slug/session-id`. */
 function sessionDirs() {
@@ -57,6 +62,10 @@ try {
   await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   await sleep(2500);
   const marker = await app.evaluate(`(() => { document.documentElement.dataset.a6 = 'alive'; return { nav: performance.getEntriesByType('navigation').length, origin: performance.timeOrigin }; })()`);
+  // Every id already archived at this point is none of this probe's business: the final
+  // check asserts the archive set comes back to exactly this set (data-independent, so
+  // it keeps holding whatever the user archives or renames later).
+  const archivedAtStart = await archivedList();
 
   // 1. The fixture is the chat pane's current blank Session. DSH reuses an existing
   //    blank Session for the same date folder, so clicking 新建聊天 on top of one
@@ -127,16 +136,16 @@ try {
   await sleep(1800);
   const rowDelete = await app.evaluate(`(async () => {
     const rows = [...document.querySelectorAll('[class*=archivedRow]')];
-    // Pick the row by INDEX in the Host's archived list, never by 'last row':
-    // the user's own archived Session sits in the same list, and a positional
-    // guess could delete that instead of the Session this probe created.
+    // Resolve the row by INDEX in the Host's archived list, never by 'last row': other
+    // archived Sessions sit in the same list, and a positional guess could delete one
+    // of those instead of the Session this probe created. The mapping is only valid
+    // while the page renders one row per ledger entry (it filters tombstoned/masked
+    // ids out), so the counts must match first.
     const archived = (await fetch('/api/chat-manager/state').then(r => r.json())).archived.map(a => a.sessionId);
+    if (rows.length !== archived.length) return { error: 'rendered rows and the archived list disagree', rows: rows.length, archived: archived.length };
     const index = archived.indexOf(${JSON.stringify(sid)});
-    const forbidden = archived.indexOf(${JSON.stringify(REAL_ARCHIVED)});
     if (index < 0 || index >= rows.length) return { error: 'S is not in the archived list', archived };
-    if (index === forbidden) return { error: 'resolved to the real archived row', archived };
     const row = rows[index];
-    if (row.innerText.includes('测试：你好')) return { error: 'refusing to touch the real archived row', rowText: row.innerText };
     const b = [...row.querySelectorAll('button')].find(x => (x.textContent || '').trim() === '删除');
     if (!b) return { error: 'no 删除 button', rowText: row.innerText };
     const r = b.getBoundingClientRect();
@@ -179,7 +188,7 @@ try {
   const dirAfter = sessionDirs().filter(d => d.endsWith(`/${sid}`));
 
   check('6 the row left the DOM', after.stillInDom === false, JSON.stringify(after));
-  check('7 S left the archive list', Array.isArray(archivedAfter) && !archivedAfter.includes(sid), JSON.stringify(archivedAfter));
+  check('7 S left the archive list AND no pre-existing archived id changed', sameSet(archivedAfter, archivedAtStart), `start=${JSON.stringify(archivedAtStart)} after=${JSON.stringify(archivedAfter)}`);
   check('8 the persisted log is GONE', dirAfter.length === 0 && filesAfter.length === 0, `before=${JSON.stringify(filesAtArchive)} after=${JSON.stringify(dirAfter)}`);
   check('9 no full page reload', after.nav === marker.nav && after.origin === marker.origin && after.marker === 'alive');
   check('10 no console errors', app.consoleErrors().length === 0, JSON.stringify(app.consoleErrors().map(e => e.text.slice(0, 200))));

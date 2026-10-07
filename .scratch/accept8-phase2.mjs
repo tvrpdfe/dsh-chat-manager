@@ -13,11 +13,18 @@ const DSH = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
 const SESSIONS = path.join(DSH, 'sessions');
 const LEDGER = path.join(DSH, 'storages', 'workspace.json');
 const RESULT = '.scratch/accept8-result.json';
-const REAL_ARCHIVED = 'session-59070395-fbf4-475a-8c6f-60d04d4fb57c';
 
 const result = readJson(RESULT);
 if (result === null || typeof result.sid !== 'string') throw new Error(`no phase-1 result at ${RESULT}`);
 const sid = result.sid;
+
+/** Whether two id lists hold the same ids (order-insensitive). */
+function sameSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((x, i) => x === b[i]);
+}
 
 function ledgerArchived() {
   const state = readJson(LEDGER);
@@ -65,7 +72,13 @@ try {
   check('2 the archived list still does not contain S', Array.isArray(archived) && !archived.includes(sid), JSON.stringify(archived));
   check('3 the row is still there, in the chat pane', rowState.present === true && rowState.inChatPane === true, JSON.stringify(rowState));
   check('4 the log is still on disk', dirs.length > 0 && dirs[0].files.length > 0, JSON.stringify(dirs));
-  check('5 the user\'s own archived Session is still archived', Array.isArray(ledger) && ledger.includes(REAL_ARCHIVED), JSON.stringify(ledger));
+  // Phase 1 asserts the round trip's set EQUALITY while it controls the whole timeline;
+  // a phase 2 may share its home with another probe that archives its own fixture, so the
+  // honest invariant here is "nothing that was archived before phase 1 got dropped, and
+  // our fixture is still not archived".
+  check('5 every pre-existing archived id is still archived, and S is not',
+    Array.isArray(ledger) && !ledger.includes(sid) && result.archivedBefore.every(id => ledger.includes(id)),
+    `start=${JSON.stringify(result.archivedBefore)} now=${JSON.stringify(ledger)}`);
   check('6 no console errors', app.consoleErrors().length === 0, JSON.stringify(app.consoleErrors().map(e => e.text.slice(0, 160))));
 } finally {
   console.log(failures.length === 0 ? 'PHASE2 ALL PASS' : `PHASE2 FAILURES: ${failures.join(', ')}`);

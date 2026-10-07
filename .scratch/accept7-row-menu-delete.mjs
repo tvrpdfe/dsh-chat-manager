@@ -59,6 +59,13 @@ function ledgerPinned() {
     return Array.isArray(ids) ? ids : [];
   } catch { return []; }
 }
+/** Whether two id lists hold the same ids (order-insensitive). */
+function sameSet(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const a = [...left].sort();
+  const b = [...right].sort();
+  return a.every((x, i) => x === b[i]);
+}
 
 const failures = [];
 const check = (name, ok, detail = '') => {
@@ -80,6 +87,10 @@ try {
   await sleep(2500);
   console.log(`DSH_HOME=${DSH}`);
   const marker = await app.evaluate(`(() => { document.documentElement.dataset.a7 = 'alive'; return { nav: performance.getEntriesByType('navigation').length, origin: performance.timeOrigin }; })()`);
+  // Every id already archived at this point is none of this probe's business: the delete
+  // must leave that set exactly as it found it (data-independent, so it keeps holding
+  // whatever the user archives or renames later).
+  const archivedAtStart = await app.evaluate(`fetch('/api/chat-manager/state').then(r => r.json()).then(j => j.archived.map(a => a.sessionId))`);
 
   // 1. The fixture is the chat pane's current blank Session. DSH reuses an existing
   //    blank Session for the same date folder, so clicking 新建聊天 on top of one
@@ -281,7 +292,7 @@ try {
   check('15 the dialog closed', after.dialogs === 0, JSON.stringify(after));
   check('16 the persisted log is GONE', dirsAfter.length === 0 && logState(sid) === null, `after=${JSON.stringify(dirsAfter)}`);
   check('17 no full page reload', after.nav === marker.nav && after.origin === marker.origin && after.marker === 'alive');
-  check('18 the archive list never held it', Array.isArray(archAfter) && !archAfter.includes(sid), JSON.stringify(archAfter));
+  check('18 the archive list never held it AND no pre-existing archived id changed', Array.isArray(archAfter) && !archAfter.includes(sid) && sameSet(archAfter, archivedAtStart), `start=${JSON.stringify(archivedAtStart)} after=${JSON.stringify(archAfter)}`);
   check('19 the chat-folder registry entry is gone', folderAfter === false, String(folderAfter));
   check('20 no console errors', app.consoleErrors().length === 0, JSON.stringify(app.consoleErrors().map(e => e.text.slice(0, 200))));
 
