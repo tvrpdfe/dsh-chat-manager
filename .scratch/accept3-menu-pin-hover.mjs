@@ -7,16 +7,22 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { openApp, sleep } from './accept2-lib.mjs';
+import { check, finish, openApp, sleep } from './accept2-lib.mjs';
 
 const URL = process.argv[2];
 if (!URL) { console.error('usage: node accept3-menu-pin-hover.mjs <url>'); process.exit(2); }
 const PORT = Number(process.env.ACCEPT_CDP_PORT ?? 9381);
-const REGISTRY = path.join(os.homedir(), '.dsh', 'storages', 'workspace.json');
+// The Host this probe measures against is the one whose home it was pointed at
+// (`DSH_HOME`), never the operator's live one: reading `~/.dsh` while the
+// verification instance runs on a copy reports the wrong registry — and the
+// rule in AGENTS.md is that every probe resolves the home this way.
+const DSH_HOME = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
+const REGISTRY = path.join(DSH_HOME, 'storages', 'workspace.json');
 const hostPinned = () => {
   try { return JSON.parse(fs.readFileSync(REGISTRY, 'utf8')).global.pinnedSessionIds ?? []; } catch { return null; }
 };
-const GROUP = process.argv[4] ?? 'workspace:48c52ce4-57a0-45db-9755-bd31a7c36b54';
+/** Which workspace group the pin order is read from; `null` = the first one rendered. */
+const GROUP = process.argv[4] ?? null;
 /** Target row: an explicit id, or the LAST non-blank workspace row (so a pin has to move it). */
 const TARGET = process.argv[3] ?? null;
 
@@ -40,8 +46,12 @@ const groupOrder = () => app.evaluate(`(() => {
       });
     }
   }
-  const g = groups.find(x => x.group === ${JSON.stringify(GROUP)});
-  return g ? g.rows.map(r => r.id.slice(8, 16) + (r.pinned ? '[PIN]' : '') + ' ' + r.text) : null;
+  const g = ${JSON.stringify(GROUP)} === null ? groups[0] : groups.find(x => x.group === ${JSON.stringify(GROUP)});
+  // The [blank] tag marks a row with no verb strip: the built-in rule hoists the
+  // current blank Session above everything, so the pin order is read among the
+  // rows that carry their actions. (No backticks in here: this is evaluated as
+  // page code inside a template literal.)
+  return g ? g.rows.map(r => r.id.slice(8, 16) + (r.pinned ? '[PIN]' : '') + (r.verbs ? '' : ' [blank]') + ' ' + r.text) : null;
 })()`);
 
 /**
@@ -177,6 +187,9 @@ try {
   const row = await probeRow();
   console.log('=== target row ===', JSON.stringify(row));
   console.log('=== pinned on host BEFORE ===', JSON.stringify(hostPinned()));
+  if (!check('a non-blank workspace row with its actions is rendered', row !== null, JSON.stringify(row))) {
+    throw new Error('no workspace row fixture: this probe needs one visible, non-blank workspace session');
+  }
 
   // ---- d: hover surface ----
   const beforeHover = await app.evaluate(`(() => {
@@ -205,6 +218,13 @@ try {
   console.log('=== d BEFORE hover ===', JSON.stringify(beforeHover));
   console.log('=== d AFTER hover ===', JSON.stringify(afterHover));
 
+  // ---- assertion d: the verb strip is a hover surface with real boxes ----
+  check('the verb strip is hidden until the row is hovered', beforeHover.display === 'none', `display=${beforeHover.display}`);
+  check('hovering the row reveals the verb strip', afterHover.display !== 'none' && afterHover.rowHovered === true, `display=${afterHover.display} hovered=${afterHover.rowHovered}`);
+  check('every revealed action has a real box and an icon',
+    afterHover.buttons.length > 0 && afterHover.buttons.every(b => b.w > 0 && b.h > 0 && b.offsetParentNull === false && b.svgPaths > 0),
+    JSON.stringify(afterHover.buttons));
+
   // ---- b: menu contents ----
   await app.mouseMove(700, 800);
   await sleep(300);
@@ -213,36 +233,79 @@ try {
   console.log(JSON.stringify(openedMenu.menu, null, 1));
   await app.screenshot('.scratch/accept3-menu.png');
 
+  const menuItems = openedMenu.menu?.items ?? [];
+  const menuLabels = menuItems.map(i => i.full);
+  check('the row menu opens with the five actions', menuItems.length === 5, JSON.stringify(menuLabels));
+  check('no menu action is listed twice', new Set(menuLabels).size === menuLabels.length, JSON.stringify(menuLabels));
+  check('every menu action carries its icon', menuItems.length > 0 && menuItems.every(i => i.iconPaths > 0), JSON.stringify(menuItems.map(i => [i.full, i.iconPaths])));
+  const delItem = menuItems.find(i => i.full === '删除会话');
+  const otherItem = menuItems.find(i => i.full !== '删除会话');
+  check('删除会话 is present and styled apart from the other actions',
+    delItem !== undefined && otherItem !== undefined && delItem.color !== otherItem.color,
+    `delete=${delItem?.color} other=${otherItem?.color}`);
+
   // ---- c1: pin ----
   console.log('=== c0 order ===', JSON.stringify(await groupOrder()));
   const pinRes = await activate('置顶');
   console.log('=== c1 pin activation ===', JSON.stringify(pinRes));
   await sleep(2200);
-  console.log('=== c1 order after pin ===', JSON.stringify(await groupOrder()));
-  console.log('=== c1 pinned on host ===', JSON.stringify(hostPinned()));
+  const pinnedAfterPin = hostPinned();
+  const orderAfterPin = await groupOrder();
+  console.log('=== c1 order after pin ===', JSON.stringify(orderAfterPin));
+  console.log('=== c1 pinned on host ===', JSON.stringify(pinnedAfterPin));
+  check('置顶 reaches the Host registry for this row',
+    pinRes.item !== undefined && Array.isArray(pinnedAfterPin) && pinnedAfterPin.includes(row.id),
+    JSON.stringify({ activation: pinRes.error ?? `${pinRes.method}:${pinRes.item?.full}`, pinned: pinnedAfterPin }));
+  // The current blank Session is hoisted above everything by the built-in rule
+  // (it has no verb strip either), so "first" means first among the rows that
+  // carry their actions.
+  const firstActionable = (order) => (Array.isArray(order) ? order.find((entry) => !entry.includes(' [blank]')) : undefined);
+  check('the pinned row is marked and is the first actionable row in its group',
+    firstActionable(orderAfterPin)?.startsWith(row.id.slice(8, 16)) === true && firstActionable(orderAfterPin).includes('[PIN]') === true,
+    JSON.stringify(orderAfterPin));
   await app.screenshot('.scratch/accept3-pinned.png');
 
   // ---- c2: reload ----
   await app.navigate();
   await app.waitForApp({ attempts: 90, intervalMs: 2000 });
   await sleep(2800);
-  console.log('=== c2 order after reload ===', JSON.stringify(await groupOrder()));
-  console.log('=== c2 pinned on host ===', JSON.stringify(hostPinned()));
+  const pinnedAfterReload = hostPinned();
+  const orderAfterReload = await groupOrder();
+  console.log('=== c2 order after reload ===', JSON.stringify(orderAfterReload));
+  console.log('=== c2 pinned on host ===', JSON.stringify(pinnedAfterReload));
+  check('the pin is still in the Host registry after a reload',
+    Array.isArray(pinnedAfterReload) && pinnedAfterReload.includes(row.id), JSON.stringify(pinnedAfterReload));
+  check('the pinned row is still the first actionable row in its group after a reload',
+    firstActionable(orderAfterReload)?.startsWith(row.id.slice(8, 16)) === true && firstActionable(orderAfterReload).includes('[PIN]') === true,
+    JSON.stringify(orderAfterReload));
 
   // ---- c3: unpin ----
   const openedMenu2 = await openMenu();
   console.log('=== c3 menu after pin ===', JSON.stringify((openedMenu2.menu || {}).items ? openedMenu2.menu.items.map(i => i.label) : openedMenu2));
+  check('the menu offers 取消置顶 once the row is pinned',
+    (openedMenu2.menu?.items ?? []).some(i => (i.label || '').startsWith('取消置顶')),
+    JSON.stringify((openedMenu2.menu?.items ?? []).map(i => i.label)));
   await app.mouseMove(700, 800);
   await sleep(300);
   const unpinRes = await activate('取消置顶');
   console.log('=== c3 unpin activation ===', JSON.stringify(unpinRes));
   await sleep(2200);
-  console.log('=== c3 order after unpin ===', JSON.stringify(await groupOrder()));
-  console.log('=== c3 pinned on host ===', JSON.stringify(hostPinned()));
+  const pinnedAfterUnpin = hostPinned();
+  const orderAfterUnpin = await groupOrder();
+  console.log('=== c3 order after unpin ===', JSON.stringify(orderAfterUnpin));
+  console.log('=== c3 pinned on host ===', JSON.stringify(pinnedAfterUnpin));
+  check('取消置顶 removes the pin from the Host registry',
+    unpinRes.item !== undefined && Array.isArray(pinnedAfterUnpin) && !pinnedAfterUnpin.includes(row.id),
+    JSON.stringify({ activation: unpinRes.error ?? `${unpinRes.method}:${unpinRes.item?.full}`, pinned: pinnedAfterUnpin }));
+  check('the row no longer carries the pinned marker',
+    Array.isArray(orderAfterUnpin) && !orderAfterUnpin.some(r => r.startsWith(row.id.slice(8, 16)) && r.includes('[PIN]')),
+    JSON.stringify(orderAfterUnpin));
 
   const errs = app.consoleErrors();
   console.log(`=== CONSOLE ERRORS (${errs.length}) ===`);
   for (const e of errs) console.log(`+${e.at}ms [${e.kind}] ${e.text}`);
+  check('no console error and no exception', errs.length === 0, `${errs.length} event(s)`);
+  finish('accept3-menu-pin-hover');
 } finally {
   await app.close();
 }

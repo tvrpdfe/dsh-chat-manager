@@ -80,8 +80,17 @@ export const chatStateSource = createSource<ChatManagerState>({ root: null, fold
 /** Archived ids hidden by the restore-path mask (settings page overlay). */
 export const archivedMaskSource = createSource<ReadonlySet<string>>(new Set())
 
-/** Hide one archived row until a snapshot without it arrives (restore path). */
+/**
+ * Monotonic id of one `/state` pull, and the pull the current mask was set
+ * under. An answer that was already in flight when the mask went up still lists
+ * the restored row, so only a pull STARTED after the mask may release it.
+ */
+let statePullSeq = 0
+let archivedMaskSetAtPull = 0
+
+/** Hide one archived row until a snapshot started after this point arrives (restore path). */
 export function markArchivedMasked(sessionId: string): void {
+  archivedMaskSetAtPull = statePullSeq
   archivedMaskSource.set(new Set(archivedMaskSource.getSnapshot()).add(sessionId))
 }
 
@@ -92,6 +101,7 @@ const STATE_PULL_BACKOFF_MS = [500, 1000]
 
 /** One state pull: fetch, project, and commit the snapshot into the state source. */
 function requestChatState(): Promise<ChatManagerState> {
+  const pull = ++statePullSeq
   return fetch('/api/chat-manager/state')
     .then((res) => { if (!res.ok) throw new Error(`state request failed (${res.status})`); return res.json() })
     .then((data: { dshRoot?: unknown; folders?: unknown; archived?: unknown }) => {
@@ -106,9 +116,11 @@ function requestChatState(): Promise<ChatManagerState> {
       // The fresh archive is authoritative in both directions: a restored id
       // either vanished from the ledger (the restore landed) or is listed
       // again (a legitimate re-archive from another surface). The mask is a
-      // one-shot bridge for a FAILED follow-up refresh, so the next
-      // successful snapshot releases it either way.
-      archivedMaskSource.update(() => new Set())
+      // one-shot bridge for a FAILED follow-up refresh, so the next successful
+      // snapshot releases it either way — but only one that STARTED after the
+      // mask went up: a slower answer from before it still lists the row, and
+      // releasing on that one would put the just-restored row back on screen.
+      if (pull > archivedMaskSetAtPull) archivedMaskSource.update(() => new Set())
       chatStateSource.set(snapshot)
       return snapshot
     })

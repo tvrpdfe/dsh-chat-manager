@@ -22,9 +22,11 @@
 //   DSH_HOME=<copy> DSH_CHAT_MANAGER_ROOT=<throwaway root> node .scratch/accept10-chat-folder-acl.mjs <url>
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { openApp } from './accept2-lib.mjs';
+import {
+  hasFullControlAce, hasExplicitFullControl, icacls, icaclsDump,
+} from './accept-acl-lib.mjs';
 
 const URL = process.argv[2];
 if (!URL) { console.error('usage: node accept10-chat-folder-acl.mjs <url>'); process.exit(2); }
@@ -45,8 +47,6 @@ const BOOT_FOLDER_NAME = '2099-01-01';
  * `DSH_CHAT_MANAGER_ROOT` cannot make the probe delete a real chat tree.
  */
 const PROBE_MARKER = path.join(CHAT_ROOT, '.accept10-probe');
-/** The signed-in account the way icacls names it (DOMAIN\user). */
-const PRINCIPAL = `${process.env.USERDOMAIN ?? ''}\\${process.env.USERNAME ?? ''}`.replace(/^\\/, '');
 /** BUILTIN\Users by SID: the localized name of a well-known group is not stable. */
 const USERS_SID = '*S-1-5-32-545';
 /** The error DSH's own grant raises when the folder cannot be opened for WRITE_DAC + WRITE_OWNER. */
@@ -59,47 +59,6 @@ const check = (name, ok, detail = '') => {
 };
 const today = (now = new Date()) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 
-/** Run icacls (absolute path, never PATH) and return exit status plus combined output. */
-function icacls(...args) {
-  const exe = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe');
-  const r = spawnSync(exe, args, { encoding: 'utf8', windowsHide: true });
-  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
-}
-/** Raw `icacls <dir>` listing, for diagnostics and the ARC checks below. */
-function icaclsDump(dir) {
-  const r = icacls(dir);
-  return r.status === 0 ? r.out.trim() : `icacls exited ${String(r.status)}`;
-}
-/**
- * The account's own ACEs as this probe reads them — a second, textually
- * independent implementation of the listing rule (the probe must not pass by
- * calling the code it verifies), not an independent *mechanism*: the
- * authoritative provisioning proof is the platform's own grant further down.
- * `inherited` decides whether an ACE that came from a parent counts.
- */
-function userAceRows(dir, { inherited }) {
-  const r = icacls(dir);
-  if (r.status !== 0) return [];
-  const rows = [];
-  for (const line of r.out.split(/\r?\n/)) {
-    for (const ace of line.matchAll(/:(?:\([A-Za-z]+\))+/g)) {
-      const before = line.slice(0, ace.index).replace(/\s+/g, ' ').trim().toLowerCase();
-      if (before !== PRINCIPAL.toLowerCase() && !before.endsWith(` ${PRINCIPAL.toLowerCase()}`)) continue;
-      if (ace[0].includes('(IO)') || ace[0].includes('(DENY)') || !ace[0].includes('(F)')) continue;
-      if (!inherited && ace[0].includes('(I)')) continue;
-      rows.push(ace[0]);
-    }
-  }
-  return rows;
-}
-/** Full control the account holds on this very object, inherited or not. */
-function hasEffectiveFullControl(dir) {
-  return userAceRows(dir, { inherited: true }).length > 0;
-}
-/** Full control the plugin itself wrote on this object (an explicit ACE). */
-function hasExplicitFullControl(dir) {
-  return userAceRows(dir, { inherited: false }).length > 0;
-}
 /** The running Host's own sandbox package: its grant code is the negative control. */
 function resolveSandboxPackage() {
   const candidates = [
@@ -127,8 +86,12 @@ try {
   const first = await state();
   check('0 the Host uses the isolated chat root from DSH_CHAT_MANAGER_ROOT', first.dshRoot === CHAT_ROOT, `dshRoot=${first.dshRoot} expected=${CHAT_ROOT}`);
   if (first.dshRoot !== CHAT_ROOT) throw new Error('the chat-root override is not in effect: refusing to touch folder permissions');
+  // `hasFullControlAce` is an existence check (no ACE order, denies skipped), and
+  // that is all this needs: the operator prepares the root with inheritance
+  // removed and a single `BUILTIN\Users:(OI)(CI)(M)`, so "no allow ACE grants the
+  // user full control" and "the account has no effective full control" coincide.
   check('0b the isolated root grants the user no full control by any ACE (the broken shape)',
-    fs.existsSync(CHAT_ROOT) && !hasEffectiveFullControl(CHAT_ROOT), `exists=${fs.existsSync(CHAT_ROOT)} ${icaclsDump(CHAT_ROOT)}`);
+    fs.existsSync(CHAT_ROOT) && !hasFullControlAce(CHAT_ROOT), `exists=${fs.existsSync(CHAT_ROOT)} ${icaclsDump(CHAT_ROOT)}`);
   check('0c the Host reports its start time', typeof first.hostStartedAt === 'number', String(first.hostStartedAt));
   // Mark the root as probe-owned BEFORE anything can create folders in it: phase
   // 2 only removes it wholesale when this marker is present, so a mis-set
@@ -169,7 +132,7 @@ try {
   //     would also pass on a root that was never broken.
   fs.mkdirSync(dateFolder, { recursive: true });
   check('4b the hand-made date folder inherits no full control for the user',
-    !hasEffectiveFullControl(dateFolder), icaclsDump(dateFolder));
+    !hasFullControlAce(dateFolder), icaclsDump(dateFolder));
   let beforeError = null;
   const before = sandbox.AclWriteGrant.create(sandbox.workspaceWriteSid(dateFolder));
   try { before.add(dateFolder); } catch (err) { beforeError = err; } finally { try { before.dispose(); } catch { /* expected to have failed */ } }

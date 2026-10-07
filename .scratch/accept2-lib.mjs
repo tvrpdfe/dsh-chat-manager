@@ -6,6 +6,36 @@ import fs from 'node:fs';
 
 export { sleep };
 
+/**
+ * One assertion of a round-2 probe, in the same shape the accept5+ probes print.
+ *
+ * Why this exists. The round-2 probes used to only `console.log` what they saw,
+ * so a run with console errors, a missing chat pane, a `time.*` key leak or a
+ * boot failure still ended with exit code 0 — while `AGENTS.md` and `spec.md`
+ * claimed those probes "assert" exactly that. Every observation a claim rests
+ * on is now a `check`, and {@link finish} turns any failure into a non-zero
+ * exit, so a broken page cannot pass by printing a discouraging number.
+ */
+const failures = [];
+let checks = 0;
+
+/** Record and print one assertion; returns the verdict for use in `if` guards. */
+export function check(name, ok, detail = '') {
+  checks += 1;
+  if (!ok) failures.push(name);
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail === '' ? '' : ` — ${detail}`}`);
+  return ok;
+}
+
+/** Print the probe's summary and set its exit code (0 only when nothing failed). */
+export function finish(label = 'ALL') {
+  console.log(failures.length === 0
+    ? `${label} PASS (${checks} checks)`
+    : `${label} FAILURES (${failures.length}/${checks}): ${failures.join(', ')}`);
+  process.exitCode = failures.length === 0 ? 0 : 1;
+  return failures.length;
+}
+
 export async function openApp({ url, port, width = 1600, height = 1000, instrument = null }) {
   const browser = launchChrome({ port, windowSize: `${width},${height}`, captureStderr: true });
   const events = [];

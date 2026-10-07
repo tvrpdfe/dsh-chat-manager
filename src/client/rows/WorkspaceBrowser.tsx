@@ -1079,11 +1079,16 @@ export function WorkspaceBrowser({
       currentBlank !== undefined && flatMemberIds.includes(currentBlank) ? currentBlank : undefined,
     )
   }, [currentBlank, flatMemberIds, list.byId, orderBy, orderState, sessionOrderByAccount])
+  // The accounts whose order is live right now. Same key set as the
+  // `retainAccountKeys` effect below — the date-folder Workspaces of the chat
+  // flow are excluded — or the two would disagree about which keys exist: this
+  // value is what `syncSessionOrders` writes back, so an unfiltered one would
+  // re-create the very chat keys that effect has just retired.
   const activeSessionOrders = useMemo<Readonly<Record<string, readonly SessionId[]>>>(() => Object.fromEntries([
-    ...orderedWorkspaces.map(workspace => [workspace.workspaceId, workspace.sessionIds] as const),
+    ...orderedWorkspaceAreaWorkspaces.map(workspace => [workspace.workspaceId, workspace.sessionIds] as const),
     [UNGROUPED_KEY, orderedUngroupedSessionIds] as const,
     [FLAT_SESSION_ORDER_KEY, orderedFlatSessionIds] as const,
-  ]), [orderedFlatSessionIds, orderedUngroupedSessionIds, orderedWorkspaces])
+  ]), [orderedFlatSessionIds, orderedUngroupedSessionIds, orderedWorkspaceAreaWorkspaces])
   useEffect(() => {
     if (workspacePhase !== 'ready') return
     actions.retainAccountKeys([
@@ -1565,6 +1570,7 @@ export function WorkspaceBrowser({
               usePanelInfo={usePanelInfo}
               renderSlot={renderSlot}
               currentId={mainSessionId}
+              archivedFilter={archivedFilter}
               deletedSessionIds={deletedIds}
               open={guardedOpen}
               onRenameRequest={requestSessionRename}

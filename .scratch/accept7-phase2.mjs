@@ -12,6 +12,13 @@ if (!URL) { console.error('usage: node accept7-phase2.mjs <url>'); process.exit(
 const result = JSON.parse(fs.readFileSync('.scratch/accept7-result.json', 'utf8'));
 const gone = [result.sid, ...process.argv.slice(3)];
 const DSH = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
+// Phase 2 asserts against this home's files (the ledger and the session
+// directories): without the throwaway copy explicitly named, those assertions
+// describe the live home instead of the Host under test.
+if (!process.env.DSH_HOME) {
+  console.error('refusing to run: set DSH_HOME to the throwaway copy of the home phase 1 used');
+  process.exit(2);
+}
 const SESSIONS = path.join(DSH, 'sessions');
 
 /** Directories on disk holding this session id. */

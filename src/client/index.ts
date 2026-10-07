@@ -148,8 +148,13 @@ export function apply(ctx: Context): void {
     'dsh-chat-manager: dictionaries',
   )
   // The delete and restore choreography repulls the Session baseline, and the
-  // archived page plus the chat pane read the plugin's own chat state.
-  setRefreshSessions(() => { void sessions.refresh() })
+  // archived page plus the chat pane read the plugin's own chat state. The
+  // registration is an effect so a disabled or reloaded plugin drops its own
+  // callback instead of leaving a stale one holding this instance's `sessions`.
+  ctx.effect(() => {
+    setRefreshSessions(() => { void sessions.refresh() })
+    return () => { setRefreshSessions(null) }
+  }, 'dsh-chat-manager: session refresh hook')
   void refreshChatState().catch(() => {})
   // `refreshChatState` already retries a few times, but a page whose boot pull
   // failed outright would otherwise keep `root: null` for its whole life: chat

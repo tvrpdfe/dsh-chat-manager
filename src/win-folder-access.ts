@@ -211,11 +211,29 @@ const WRITE_OWNER_CODES = new Set(['FA', 'GA', 'WO'])
  * The remaining documented file/directory rights codes, none of which can carry
  * `WRITE_DAC` or `WRITE_OWNER`. A code outside both sets makes the rights field
  * unreadable (`null`) rather than silently "not granting".
+ *
+ * The list is the SDDL rights table, so it includes the directory-service codes
+ * (`CC`, `LC`, `RP`, …) and the per-right file codes: `RD` (read data), `AD`
+ * (append data), `RA`/`WA` (attributes). Omitting the file codes read a group
+ * deny of read access alone as an unreadable DENY — which this reader treats as
+ * carrying BOTH rights — so a folder that only withheld read access was refused
+ * the repair it needed. The three-letter extended-attribute codes live in
+ * {@link THREE_LETTER_PLAIN_CODES}, which the reader must match before it steps
+ * in twos.
  */
 const KNOWN_PLAIN_CODES = new Set([
   'CC', 'DC', 'LC', 'SW', 'RP', 'WP', 'DT', 'LO', 'CR', 'SD', 'RC', 'NR',
   'FR', 'FW', 'FX', 'GR', 'GW', 'GX', 'KR', 'KW', 'KX', 'NW', 'NX',
+  'RD', 'AD', 'RA', 'WA',
 ])
+
+/**
+ * The documented rights codes that are three letters long: `FILE_READ_EA` and
+ * `FILE_WRITE_EA`. Stepping through the field in fixed pairs split `REA` into
+ * `RE` + `A` — a code this reader does not know — so a deny that withholds only
+ * extended-attribute access was read as denying every right.
+ */
+const THREE_LETTER_PLAIN_CODES = new Set(['REA', 'WEA'])
 
 /**
  * The SDDL abbreviations that stand for a fixed SID. `icacls /save` writes
@@ -294,27 +312,45 @@ function resolveTrustee(trustee: string): { trustee: string; resolved: boolean }
 }
 
 /**
- * Read one SDDL rights field: either a `0x…` mask or a run of two-letter codes.
+ * Read one SDDL rights field: either a `0x…` mask or a run of codes.
+ *
+ * The codes are read by longest match, not in fixed pairs: the field mixes
+ * two-letter codes, the three-letter `REA`/`WEA`, and the single-letter `X`
+ * (`FILE_EXECUTE`). An unknown code anywhere makes the whole field unreadable,
+ * which is the safe direction in both ACE kinds (see `evaluateDacl`).
  * @param field - the ACE's rights field.
  * @returns which of the two rights it carries, or `null` when it cannot be read.
  */
 function parseRightsField(field: string): DaclAce['rights'] {
-  const text = field.trim()
+  const text = field.trim().toUpperCase()
   if (text === '') return { writeDac: false, writeOwner: false }
-  if (/^0x[0-9a-f]+$/i.test(text)) {
+  if (/^0X[0-9A-F]+$/.test(text)) {
     const mask = Number.parseInt(text.slice(2), 16)
     // GENERIC_ALL is mapped onto file all access by the access check, so it
     // carries both rights; the other generic bits do not.
     if ((mask & 0x1000_0000) !== 0) return { writeDac: true, writeOwner: true }
     return { writeDac: (mask & 0x0004_0000) !== 0, writeOwner: (mask & 0x0008_0000) !== 0 }
   }
-  if (text.length % 2 !== 0) return null
   const rights = { writeDac: false, writeOwner: false }
-  for (let i = 0; i < text.length; i += 2) {
-    const code = text.slice(i, i + 2).toUpperCase()
-    if (WRITE_DAC_CODES.has(code)) rights.writeDac = true
-    if (WRITE_OWNER_CODES.has(code)) rights.writeOwner = true
-    if (!WRITE_DAC_CODES.has(code) && !WRITE_OWNER_CODES.has(code) && !KNOWN_PLAIN_CODES.has(code)) return null
+  let i = 0
+  while (i < text.length) {
+    const three = text.slice(i, i + 3)
+    if (THREE_LETTER_PLAIN_CODES.has(three)) { i += 3; continue }
+    const two = text.slice(i, i + 2)
+    // `FA`/`GA` appear in BOTH tables (file all access carries both rights), so
+    // the two memberships are read independently — an early `continue` on the
+    // first hit would silently drop WRITE_OWNER.
+    const carriesWriteDac = WRITE_DAC_CODES.has(two)
+    const carriesWriteOwner = WRITE_OWNER_CODES.has(two)
+    if (carriesWriteDac || carriesWriteOwner) {
+      if (carriesWriteDac) rights.writeDac = true
+      if (carriesWriteOwner) rights.writeOwner = true
+      i += 2
+      continue
+    }
+    if (KNOWN_PLAIN_CODES.has(two)) { i += 2; continue }
+    if (text[i] === 'X') { i += 1; continue }
+    return null
   }
   return rights
 }

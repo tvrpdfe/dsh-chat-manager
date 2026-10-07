@@ -21,31 +21,12 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { PLATFORM_SEEDS } from './platform-seeds.mjs'
 
 const SCRIPT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)))
 const PKG = path.resolve(SCRIPT_DIR, '..')
 const SRC = path.join(PKG, 'src')
 const LIB = path.join(PKG, 'lib')
-
-/**
- * Platform seed words: the entities the web shell shares into the module table
- * (`packages/client/web/src/seed.ts`). Keeping the whole table external is what
- * stops esbuild from inlining a second copy of a platform-provided module —
- * including the ones this fork does not import today. The list must stay equal
- * to `PLATFORM_SEEDS` in `scripts/verify-bundle.mjs`, which asserts the emitted
- * bundle requires nothing else.
- */
-const PLATFORM_EXTERNALS = [
-  'react',
-  'react/jsx-runtime',
-  'react-dom',
-  'react-dom/client',
-  '@deepseek-ai/cordis',
-  '@deepseek-ai/dsh-client-store',
-  '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-ui-dockkit',
-]
 
 /**
  * Rewrite one CSS Module sheet: every class selector becomes `${hash}_${local}`
@@ -148,7 +129,7 @@ async function buildClient() {
     format: 'cjs',
     platform: 'browser',
     target: 'es2020',
-    external: PLATFORM_EXTERNALS,
+    external: PLATFORM_SEEDS,
     define: {
       'process.env.NODE_ENV': '"production"',
       'import.meta.env.MODE': '"production"',

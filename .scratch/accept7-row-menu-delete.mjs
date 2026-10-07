@@ -20,6 +20,13 @@ const URL = process.argv[2];
 if (!URL) { console.error('usage: node accept7-row-menu-delete.mjs <url>'); process.exit(2); }
 const PORT = Number(process.env.ACCEPT_CDP_PORT ?? 9407);
 const DSH = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
+// The delete path writes the archive ledger and unpins the id, and every
+// assertion below reads this home's own files: a run without the throwaway copy
+// would measure the live home and report its state as the result.
+if (!process.env.DSH_HOME) {
+  console.error('refusing to run: set DSH_HOME to a throwaway copy of the home (this probe mutates its archive ledger)');
+  process.exit(2);
+}
 const SESSIONS = path.join(DSH, 'sessions');
 const REGISTRY = path.join(DSH, 'storages', 'workspace.json');
 const RESULT = '.scratch/accept7-result.json';

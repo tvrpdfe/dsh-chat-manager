@@ -1,7 +1,7 @@
 // Assertion a + regression check: no slot error, zero console errors, rows
 // rendered, and the view store must not be re-dispatched in a loop.
 // Usage: node .scratch/accept2-regress.mjs <url>
-import { openApp, printEvents, sleep } from './accept2-lib.mjs';
+import { check, finish, openApp, printEvents, sleep } from './accept2-lib.mjs';
 
 const URL = process.argv[2];
 if (!URL) { console.error('usage: node accept2-regress.mjs <url>'); process.exit(2); }
@@ -66,6 +66,27 @@ try {
   printEvents(app.events, e => e.kind === 'net' && (e.text.includes('chat-manager') || e.text.includes('workspaces') || e.text.includes('session/list')));
   await app.screenshot('.scratch/accept2-boot-fixed.png');
   console.log('screenshot .scratch/accept2-boot-fixed.png');
+
+  // ---- assertion a: the shell booted, and booted whole ----
+  check('the shell painted Session rows', gotRows === true && out.rowCount > 0, `gotRows=${gotRows} rowCount=${out.rowCount}`);
+  check('no slot error boundary fired', out.slotErrors.length === 0, JSON.stringify(out.slotErrors));
+  check('the chat pane is rendered beside the workspace pane', out.chatSectionPresent === true && out.splitPresent >= 1 && out.paneCount >= 2, `chat=${out.chatSectionPresent} split=${out.splitPresent} panes=${out.paneCount}`);
+  check('the split divider is rendered', out.dividerPresent >= 1, `dividers=${out.dividerPresent}`);
+  check('both region labels are present', out.sectionLabels.includes('工作区') && out.sectionLabels.includes('聊天'), JSON.stringify(out.sectionLabels));
+  check('the chat header names its add-chat action', out.newChatButtons >= 1, `buttons=${out.newChatButtons}`);
+  check('no console error and no exception', errs.length === 0, `${errs.length} event(s)`);
+
+  // ---- regression: the view store must SETTLE (the self-feed loop) ----
+  // A dependency cycle in the retainAccountKeys effect (React #185) rewrites the
+  // view store on every render, so the count keeps climbing while the page sits
+  // idle. Comparing two samples needs no arbitrary ceiling: a healthy page
+  // writes it a few times and then stops.
+  const writesSettled = await app.evaluate(`(() => ((window.__probe && window.__probe.sets) || []).filter(s => s.key === 'dsh.workspace.view.v5').length)()`);
+  await sleep(2000);
+  const writesAfter = await app.evaluate(`(() => ((window.__probe && window.__probe.sets) || []).filter(s => s.key === 'dsh.workspace.view.v5').length)()`);
+  check('the view store settles while the page is idle', writesAfter === writesSettled, `${writesSettled} → ${writesAfter} writes over 2s idle; span was ${out.viewSpanMs}ms`);
+
+  finish('accept2-regress');
 } finally {
   await app.close();
 }

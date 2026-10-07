@@ -36,8 +36,10 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import {
+  daclLine, hasFullControlAce, hasExplicitFullControl, icacls, icaclsDump, ownSid,
+} from './accept-acl-lib.mjs';
 
 /** Scratch tree, under the OS temp directory only: never a chat root. */
 const SCRATCH = path.join(os.tmpdir(), `dsh-accept11-${process.pid}`);
@@ -52,64 +54,6 @@ const check = (name, ok, detail = '') => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail === '' ? '' : ` — ${detail}`}`);
   if (!ok) failures.push(name);
 };
-
-/** Run icacls (absolute path, never PATH); returns exit status plus combined output. */
-function icacls(...args) {
-  const exe = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe');
-  const r = spawnSync(exe, args, { encoding: 'utf8', windowsHide: true });
-  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
-}
-
-/** The raw `D:…` DACL line of a folder, read the way icacls stores it (UTF-16LE save file). */
-function daclLine(dir) {
-  const saveFile = path.join(SCRATCH, `save-${Math.abs(hash(dir))}.txt`);
-  try {
-    const r = icacls(dir, '/save', saveFile);
-    if (r.status !== 0) return `icacls /save exited ${String(r.status)}`;
-    const lines = fs.readFileSync(saveFile, 'utf16le').split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== '');
-    return lines[lines.length - 1] ?? '';
-  } finally {
-    fs.rmSync(saveFile, { force: true });
-  }
-}
-
-function hash(text) {
-  let h = 0;
-  for (const ch of text) h = (h * 31 + ch.codePointAt(0)) | 0;
-  return h;
-}
-
-/** The ACEs of a folder as icacls prints them, without its localized summary line. */
-function aceDump(dir) {
-  return icacls(dir).out.split(/\r?\n/).filter((l) => l.includes('(')).map((l) => l.trim()).join(' | ');
-}
-
-/** The account's own ACEs as icacls prints them (an independent, textual view). */
-function userAceRows(dir, { inherited }) {
-  const r = icacls(dir);
-  if (r.status !== 0) return [];
-  const principal = `${process.env.USERDOMAIN ?? ''}\\${process.env.USERNAME ?? ''}`.toLowerCase();
-  const rows = [];
-  for (const line of r.out.split(/\r?\n/)) {
-    for (const ace of line.matchAll(/:(?:\([A-Za-z]+\))+/g)) {
-      const before = line.slice(0, ace.index).replace(/\s+/g, ' ').trim().toLowerCase();
-      if (before !== principal && !before.endsWith(` ${principal}`)) continue;
-      if (!ace[0].includes('(F)')) continue;
-      if (!inherited && ace[0].includes('(I)')) continue;
-      rows.push(ace[0]);
-    }
-  }
-  return rows;
-}
-
-const hasEffectiveFullControl = (dir) => userAceRows(dir, { inherited: true }).length > 0;
-const hasExplicitFullControl = (dir) => userAceRows(dir, { inherited: false }).length > 0;
-/** The account's own SID, from whoami — ASCII, whatever the console code page is. */
-function ownSid() {
-  const exe = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'whoami.exe');
-  const r = spawnSync(exe, ['/user', '/fo', 'csv', '/nh'], { encoding: 'utf8', windowsHide: true });
-  return /S-1-\d+(?:-\d+)+/.exec(`${r.stdout ?? ''}`)?.[0] ?? null;
-}
 
 function resolveSandboxPackage() {
   const candidates = [
@@ -161,8 +105,8 @@ try {
   // ---- A: the deny the old reader could not see ---------------------------------
   const ownedDeny = path.join(SCRATCH, 'owned-deny');
   fs.mkdirSync(ownedDeny);
-  check('A0 the folder starts with effective full control for the account',
-    hasEffectiveFullControl(ownedDeny), aceDump(ownedDeny));
+  check('A0 the folder starts with a full-control ACE for the account (existence, not an access decision)',
+    hasFullControlAce(ownedDeny), icaclsDump(ownedDeny));
   const deny = icacls(ownedDeny, '/deny', `*${sid}:(F)`);
   check('A1 an explicit deny of everything for the account itself is in place',
     deny.status === 0, `exit=${deny.status}`);
@@ -184,7 +128,7 @@ try {
     againA.ok === true && againA.changed === false && thirdA.changed === false, JSON.stringify([againA, thirdA]));
   console.log(`INFO  A6 ctime across a read-only check: ${ctimeBefore} -> ${ctimeAfter}`
     + ` (a DACL write moves it; informational, not a check)`);
-  check('A7 the account still holds the ACE the repair wrote', hasExplicitFullControl(ownedDeny), aceDump(ownedDeny));
+  check('A7 the account still holds the ACE the repair wrote', hasExplicitFullControl(ownedDeny), icaclsDump(ownedDeny));
   // The platform's own grant leaves an `Everyone:(DENY)(FILE_DELETE_CHILD)` ACE on
   // the folder (spelled `D;CI;DT;;;WD` in the saved descriptor, plus the Low label
   // in the SACL section on the same line). That deny must NOT make the check
@@ -207,7 +151,7 @@ try {
     refusedB.ok === false && refusedB.changed === false && refusedB.detail.includes('S-1-5-32-545'),
     JSON.stringify(refusedB));
   check('B3 it wrote nothing: no explicit full-control ACE for the account',
-    !hasExplicitFullControl(groupDeny), aceDump(groupDeny));
+    !hasExplicitFullControl(groupDeny), icaclsDump(groupDeny));
   // The refusal's REASON, measured rather than asserted: make the very grant the
   // check declined to make, and watch it fail to help. Without this the claim
   // "a grant cannot outrank a group deny" would rest on nothing (B3 already
@@ -232,7 +176,7 @@ try {
   check('C0 a parent that grants only Modify (no CREATOR OWNER entry)', stripped.status === 0, `exit=${stripped.status}`);
   const modifyFolder = path.join(modifyParent, 'workspace');
   fs.mkdirSync(modifyFolder);
-  check('C1 the child inherits no full control', !hasEffectiveFullControl(modifyFolder), daclLine(modifyFolder));
+  check('C1 the child inherits no full control', !hasFullControlAce(modifyFolder), daclLine(modifyFolder));
   const beforeC = platformGrant(sandbox, modifyFolder);
   check('C2 the platform grant fails there (the E:\\ pathology)', beforeC !== null && EXPECTED_ERROR.test(beforeC), String(beforeC));
   const repairedC = ensureWindowsFolderAccess(modifyFolder);

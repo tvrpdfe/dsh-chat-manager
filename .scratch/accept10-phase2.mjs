@@ -9,9 +9,9 @@
 //   DSH_HOME=<copy> DSH_CHAT_MANAGER_ROOT=<throwaway root> node .scratch/accept10-phase2.mjs <url>
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { openApp } from './accept2-lib.mjs';
+import { hasExplicitFullControl, icacls, icaclsDump } from './accept-acl-lib.mjs';
 
 const URL = process.argv[2];
 if (!URL) { console.error('usage: node accept10-phase2.mjs <url>'); process.exit(2); }
@@ -23,8 +23,6 @@ const CHAT_ROOT = process.env.DSH_CHAT_MANAGER_ROOT;
 const PORT = Number(process.env.ACCEPT_CDP_PORT ?? 9413);
 const RESULT = '.scratch/accept10-result.json';
 const SCRATCH = path.join(path.dirname(CHAT_ROOT), 'accept10-scratch');
-/** The signed-in account the way icacls names it (DOMAIN\user). */
-const PRINCIPAL = `${process.env.USERDOMAIN ?? ''}\\${process.env.USERNAME ?? ''}`.replace(/^\\/, '');
 const EXPECTED_ERROR = /SetNamedSecurityInfoW failed \(Win32 5\)/;
 
 const failures = [];
@@ -33,41 +31,6 @@ const check = (name, ok, detail = '') => {
   if (!ok) failures.push(name);
 };
 
-function icacls(...args) {
-  const exe = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'icacls.exe');
-  const r = spawnSync(exe, args, { encoding: 'utf8', windowsHide: true });
-  return { status: r.status, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
-}
-/** Raw `icacls <dir>` listing, for diagnostics. */
-function icaclsDump(dir) {
-  const r = icacls(dir);
-  return r.status === 0 ? r.out.trim() : `icacls exited ${String(r.status)}`;
-}
-/**
- * The account's own ACEs as this probe reads them — a second, textually
- * independent implementation of the listing rule (it must not pass by calling
- * the code it verifies), not an independent mechanism: the authoritative proof
- * is the platform's own grant further down.
- */
-function userAceRows(dir, { inherited }) {
-  const r = icacls(dir);
-  if (r.status !== 0) return [];
-  const rows = [];
-  for (const line of r.out.split(/\r?\n/)) {
-    for (const ace of line.matchAll(/:(?:\([A-Za-z]+\))+/g)) {
-      const before = line.slice(0, ace.index).replace(/\s+/g, ' ').trim().toLowerCase();
-      if (before !== PRINCIPAL.toLowerCase() && !before.endsWith(` ${PRINCIPAL.toLowerCase()}`)) continue;
-      if (ace[0].includes('(IO)') || ace[0].includes('(DENY)') || !ace[0].includes('(F)')) continue;
-      if (!inherited && ace[0].includes('(I)')) continue;
-      rows.push(ace[0]);
-    }
-  }
-  return rows;
-}
-/** Full control the plugin itself wrote on this object (an explicit ACE). */
-function hasExplicitFullControl(dir) {
-  return userAceRows(dir, { inherited: false }).length > 0;
-}
 function resolveSandboxPackage() {
   const candidates = [
     process.env.ACCEPT10_SANDBOX_PKG,

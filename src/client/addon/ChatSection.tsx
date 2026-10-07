@@ -13,7 +13,7 @@ import {
 import { SessionNodeItem } from '../rows/Rows.tsx'
 import css from '../rows/WorkspaceBrowser.module.css'
 import { SEARCH_QUERY_MAX_CODE_UNITS } from '../rows/WorkspaceBrowser.tsx'
-import { deriveFlat, visibleSessionIds, type SessionRowState } from '../tree.ts'
+import { deriveFlat, visibleSessionIds, type ArchivedFilter, type SessionRowState } from '../tree.ts'
 import { isUnderChatRoot } from '../../shared/paths.ts'
 import type { ChatSearchHit } from '../../shared/chat.ts'
 import type { WorkspaceBrowserProps } from '../contract/slots.ts'
@@ -42,6 +42,13 @@ interface ChatSectionProps {
   renderSlot: WorkspaceBrowserProps['renderSlot']
   /** The main-view Session (blank rows stay visible only for it). */
   currentId: SessionId | undefined
+  /**
+   * The archived filter the view menu is set to, read by the workspace pane from
+   * the same store. The chat pane must honour the very same choice: hardcoding
+   * the default here made the two panes disagree (「显示已归档」 mixed archived
+   * rows into the workspace pane only, 「仅显示已归档」 emptied the chat pane).
+   */
+  archivedFilter: ArchivedFilter
   deletedSessionIds: ReadonlySet<SessionId>
   open: (sessionId: SessionId) => void
   /** Open the shared rename dialog from a row title double-click. */
@@ -74,8 +81,8 @@ interface ChatSectionProps {
  */
 export function ChatSection({
   wide, useSessions, useSessionStatus, useWorkspaces, useChat, usePanelInfo, renderSlot, currentId,
-  deletedSessionIds, open, onRenameRequest, onNewChat, query, normalizedQuery, searchExpanded,
-  searching, hits, setQuery, setSearchExpanded, t,
+  archivedFilter, deletedSessionIds, open, onRenameRequest, onNewChat, query, normalizedQuery,
+  searchExpanded, searching, hits, setQuery, setSearchExpanded, t,
 }: ChatSectionProps) {
   const list = useSessions(s => s)
   const statuses = useSessionStatus(s => s)
@@ -91,18 +98,19 @@ export function ChatSection({
   const searchInputRef = useRef<HTMLInputElement | null>(null)
 
   // Chat membership plus the shipped visibility rules: archived rows follow the
-  // default hide-archived view, blank rows only survive as the current Session,
-  // and the plugin's tombstones stay hidden until the Host drops them.
+  // SAME filter the workspace pane is showing (one control, one answer in both
+  // panes), blank rows only survive as the current Session, and the plugin's
+  // tombstones stay hidden until the Host drops them.
   const chatNodes = useMemo(() => {
     const rowState: SessionRowState = {
       pinnedSessionIds,
       archivedSessionIds,
-      archivedFilter: 'default',
+      archivedFilter,
     }
-    const memberIds = visibleSessionIds(list, rowState.archivedSessionIds, 'default')
+    const memberIds = visibleSessionIds(list, rowState.archivedSessionIds, archivedFilter)
     return deriveFlat(list, memberIds, rowState, statuses, deletedSessionIds)
       .filter(row => isUnderChatRoot(list.byId[row.id]?.cwd, chatRoot))
-  }, [list, statuses, archivedSessionIds, pinnedSessionIds, deletedSessionIds, chatRoot])
+  }, [list, statuses, archivedSessionIds, pinnedSessionIds, archivedFilter, deletedSessionIds, chatRoot])
 
   const shown = useMemo(() => {
     if (normalizedQuery === '') return chatNodes

@@ -1,0 +1,5 @@
+anchor      5badb15
+upstream    5badb15009ae1756c3afe0ae0cef1faafc290ccc Merge pull request #5648 from deepseek-harness/worktree/release-dsh-0.2.1-alpha.1
+anchor match yes
+files       15 identical, 7 divergent, 0 removed, 5 fork-only
+seeds       9 upstream / 9 here — equal

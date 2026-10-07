@@ -16,6 +16,13 @@ const PORT = Number(process.env.ACCEPT_CDP_PORT ?? 9399);
 // Resolve the home from DSH_HOME so this probe can run against an isolated
 // copy of it instead of the live home.
 const DSH = process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh');
+// The delete path writes the archive ledger and unpins the id, and every
+// assertion below reads this home's own files: a run without the throwaway copy
+// would measure the live one and report its state as the result.
+if (!process.env.DSH_HOME) {
+  console.error('refusing to run: set DSH_HOME to a throwaway copy of the home (this probe mutates its archive ledger)');
+  process.exit(2);
+}
 const SESSIONS = path.join(DSH, 'sessions');
 const RESULT = '.scratch/accept6-result.json';
 /** Whether two id lists hold the same ids (order-insensitive). */

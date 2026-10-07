@@ -1,7 +1,7 @@
 // Assertions a (boot) and f (chat pane + divider + new-chat + date folders kept
 // out of the workspace area), plus the write-count regression check.
 // Usage: node .scratch/accept3-boot-chat.mjs <url>
-import { openApp, sleep } from './accept2-lib.mjs';
+import { check, finish, openApp, sleep } from './accept2-lib.mjs';
 
 const URL = process.argv[2];
 if (!URL) { console.error('usage: node accept3-boot-chat.mjs <url>'); process.exit(2); }
@@ -76,6 +76,32 @@ try {
   for (const e of errs) console.log(`+${e.at}ms [${e.kind}] ${e.text}`);
   await app.screenshot('.scratch/accept3-boot.png');
   console.log('screenshot .scratch/accept3-boot.png');
+
+  // ---- assertion a: the page booted whole ----
+  check('the shell painted Session rows', gotRows === true && out.rowCount > 0, `gotRows=${gotRows} rowCount=${out.rowCount}`);
+  check('the page did not fall into its error state', out.bootFailed === false, out.bodyTextHead.slice(0, 120));
+  check('no slot error boundary fired', out.slotErrors.length === 0, JSON.stringify(out.slotErrors));
+  check('no console error and no exception', errs.length === 0, `${errs.length} event(s)`);
+
+  // ---- assertion f: both regions, split apart, and the chat pane's own add ----
+  check('the workspace pane lists rows', out.workspacePaneRegionCount > 0, `rows=${out.workspacePaneRegionCount}`);
+  check('the chat pane lists rows of its own', out.chatPaneRegionCount > 0, `rows=${out.chatPaneRegionCount}`);
+  check('the split divider is rendered', out.divider !== null && out.divider.rect.h > 0, JSON.stringify(out.divider));
+  check('the split holds both panes', out.split !== null && out.split.childCount >= 2, JSON.stringify(out.split));
+  check('the chat pane carries its labels', out.chatLabelText === '聊天' || out.chatLabelText === '会话', String(out.chatLabelText));
+  check('the chat header has its 新建聊天 action', out.chatHeaderAddButton === true, `buttons total=${out.newChatButtonsTotal}`);
+  // Date folders ARE the chat sessions' workspaces, so a date-folder row inside
+  // the workspace pane would mean the chat area is being listed twice.
+  check('no dated chat folder is listed in the workspace pane', out.dateLikeWorkspaceTitlesInWorkspacePane.length === 0 && out.dateLikeTextAnywhereInWorkspacePane.length === 0,
+    JSON.stringify(out.dateLikeWorkspaceTitlesInWorkspacePane.concat(out.dateLikeTextAnywhereInWorkspacePane)).slice(0, 200));
+
+  // ---- regression: the view store must SETTLE (the self-feed loop) ----
+  const writesSettled = out.viewWriteCount;
+  await sleep(2000);
+  const writesAfter = await app.evaluate(`(() => ((window.__probe && window.__probe.sets) || []).filter(s => s.key === 'dsh.workspace.view.v5').length)()`);
+  check('the view store settles while the page is idle', writesAfter === writesSettled, `${writesSettled} → ${writesAfter} writes over 2s idle; span was ${out.viewSpanMs}ms`);
+
+  finish('accept3-boot-chat');
 } finally {
   await app.close();
 }

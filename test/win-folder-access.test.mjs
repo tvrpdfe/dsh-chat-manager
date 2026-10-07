@@ -262,6 +262,27 @@ test('unreadable ACEs are counted, and never turn into a false green', () => {
   assert.equal(evaluateDacl(parseDaclSddl(sddl('AU;SA;FA;;;SY')), USER_SID, TOKEN).unreadable, 1)
 })
 
+test('a deny that withholds only rights this check does not need is not a block', () => {
+  // `RD` (read data), `AD` (append data), `REA`/`WEA` (extended attributes) and
+  // `RA`/`WA` (attributes) are documented rights codes that carry neither
+  // WRITE_DAC nor WRITE_OWNER. Reading them as unreadable made the reader
+  // pessimistic — an unreadable DENY is assumed to carry both rights — so a
+  // group deny of read access alone was reported as a deny of full control and
+  // the folder was refused the repair it needed, naming that group.
+  assert.equal(decide([`D;;RD;;;${USERS_SID}`, INHERITED_MODIFY]), 'grant')
+  assert.equal(decide([`D;;AD;;;${USERS_SID}`, INHERITED_MODIFY]), 'grant')
+  assert.equal(decide([`D;;REA;;;${USERS_SID}`, INHERITED_MODIFY]), 'grant')
+  assert.equal(decide([`D;;WEA;;;${USERS_SID}`, INHERITED_MODIFY]), 'grant')
+  assert.equal(decide([`D;;WA;;;${USERS_SID}`, INHERITED_MODIFY]), 'grant')
+  // `X` (FILE_EXECUTE) is the one single-letter code, so a rights field may be
+  // odd-length: `RDX` is read as `RD` + `X`, never as unreadable.
+  assert.equal(decide([`D;;X;;;${USERS_SID}`, INHERITED_MODIFY]), 'grant')
+  assert.equal(decide([`D;;RDX;;;${USERS_SID}`, INHERITED_MODIFY]), 'grant')
+  // A code this reader cannot place is still read pessimistically (fail closed).
+  assert.equal(decide([`D;;QQ;;;${USERS_SID}`, INHERITED_MODIFY]), 'refuse')
+  assert.equal(decide([`D;;QX;;;${USERS_SID}`, INHERITED_MODIFY]), 'refuse')
+})
+
 test('a trustee standing for the owner is never written off as somebody else', () => {
   // `OW` (OWNER RIGHTS) applies to the object's OWNER — normally this account —
   // so it is deliberately left unexpanded: its deny blocks (fail closed) and its

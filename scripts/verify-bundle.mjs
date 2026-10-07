@@ -10,6 +10,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { PLATFORM_SEEDS } from './platform-seeds.mjs'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 /** The browser bundle: the gate's subject. */
@@ -18,17 +19,7 @@ const CLIENT_BUNDLE = 'lib/client.js'
 const ARTIFACTS = [CLIENT_BUNDLE, 'lib/index.js']
 
 /** Seed words of the platform client module table (dsh-client-modules). */
-const PLATFORM_SEEDS = new Set([
-  'react',
-  'react/jsx-runtime',
-  'react-dom',
-  'react-dom/client',
-  '@deepseek-ai/cordis',
-  '@deepseek-ai/dsh-client-store',
-  '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-ui-dockkit',
-])
+const SEEDS = new Set(PLATFORM_SEEDS)
 
 /** Platform names that only ever existed before the 0.2.x rename. */
 const RETIRED = [
@@ -54,8 +45,9 @@ const collect = (dir) => {
   }
 }
 collect('src')
-// `tsconfig.json` is not read by build.mjs directly, but esbuild discovers it.
-inputs.push('scripts/build.mjs', 'tsconfig.json', 'package.json')
+// `tsconfig.json` is not read by build.mjs directly, but esbuild discovers it;
+// the seed list IS read by the build, so an edit to it changes the bundle.
+inputs.push('scripts/build.mjs', 'scripts/platform-seeds.mjs', 'tsconfig.json', 'package.json')
 const oldestArtifact = Math.min(...ARTIFACTS.map(rel => statSync(path.join(ROOT, rel)).mtimeMs))
 const stale = inputs
   .map(rel => ({ rel, mtimeMs: statSync(path.join(ROOT, rel)).mtimeMs }))
@@ -68,9 +60,35 @@ if (stale.length > 0) {
 // 1. Every module-table request stays inside the seed words.
 const requires = new Set([...source.matchAll(/require\(["']([^"']+)["']\)/g)].map(match => match[1]))
 for (const specifier of requires) {
-  if (!PLATFORM_SEEDS.has(specifier)) {
+  if (!SEEDS.has(specifier)) {
     failures.push(`lib/client.js requires the non-seed module "${specifier}"`)
   }
+}
+
+// 1b. …and every seed word the browser sources import is still such a request.
+//     Check 1 alone cannot see the dangerous edit: dropping an entry from the
+//     external list makes esbuild inline that platform module, which SHRINKS the
+//     require set — a subset check gets greener, not redder. Platform modules
+//     outside the seed table (`dsh-util-*`, the `api-*-controller` clients) are
+//     meant to be bundled, so only seed words are demanded back here. `import
+//     type` statements are erased by esbuild and so are not demands.
+const seedImports = new Set()
+for (const rel of inputs.filter(entry => /\.tsx?$/.test(entry))) {
+  const text = readFileSync(path.join(ROOT, rel), 'utf8')
+  for (const match of text.matchAll(/(?:^|\n)\s*(?:import|export)\s+(?!type\b)[^;]*?from\s*['"]([^'"]+)['"]/g)) {
+    if (SEEDS.has(match[1])) seedImports.add(match[1])
+  }
+  for (const match of text.matchAll(/(?:^|\n)\s*import\s*['"]([^'"]+)['"]/g)) {
+    if (SEEDS.has(match[1])) seedImports.add(match[1])
+  }
+}
+for (const specifier of seedImports) {
+  if (!requires.has(specifier)) {
+    failures.push(`lib/client.js no longer requires "${specifier}", which src/ imports: it was inlined instead of staying external`)
+  }
+}
+if (seedImports.size === 0) {
+  failures.push('no seed-word import was found in src/: this scan is not reading the sources it claims to check')
 }
 
 // 2. Retired platform names never come back.

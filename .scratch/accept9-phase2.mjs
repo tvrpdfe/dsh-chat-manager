@@ -152,9 +152,15 @@ try {
   const ledger2 = ledgerArchived();
   const dialogClosed = !String(after.bodyText).includes('此操作不可撤销')
     && !String(after.bodyText).includes('live and names no stored log');
+  // The status is read from the response itself, not inferred from the dialog:
+  // the click's own request is in the captured network events.
+  const deleteAnswers = app.events
+    .filter((e) => e.kind === 'net' && e.text.includes('/api/chat-manager/delete-session'))
+    .map((e) => e.text);
   check('8 the ghost row left the archived list', gone);
   check('9 the ledger no longer lists it', Array.isArray(ledger2) && !ledger2.includes(sid), JSON.stringify(ledger2));
-  check('10 the delete answered 2xx (the confirmation dialog closed with no error)', dialogClosed, String(after.bodyText).replace(/\n+/g, ' | ').slice(0, 200));
+  check('10 the delete answered 2xx', deleteAnswers.some((text) => /^2\d\d /.test(text)),
+    `${JSON.stringify(deleteAnswers)} | dialog closed with no error: ${dialogClosed}`);
   check('11 the log is still absent', dirsOf(sid).length === 0, JSON.stringify(dirsOf(sid)));
   // Same containment rule after the delete: the ghost row is gone, and nothing that was
   // archived before phase 1 went with it.

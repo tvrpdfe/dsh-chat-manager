@@ -1,5 +1,5 @@
 diff --git "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\rows\\WorkspaceBrowser.tsx" "b/F:\\workdir\\dsh-chat-manager\\src\\client\\rows\\WorkspaceBrowser.tsx"
-index 3c900b2..5588643 100644
+index 3c900b2..2c7587a 100644
 --- "a/F:\\workdir\\deepseek-harness\\packages\\client\\ui-workspace\\src\\client\\rows\\WorkspaceBrowser.tsx"
 +++ "b/F:\\workdir\\dsh-chat-manager\\src\\client\\rows\\WorkspaceBrowser.tsx"
 @@ -15,5 +15,5 @@
@@ -253,7 +253,24 @@ index 3c900b2..5588643 100644
 +  )
    const orderedUngroupedSessionIds = useMemo(() => {
      const baseOrder = orderBy === 'updated'
-@@ -968,7 +1090,13 @@ export function WorkspaceBrowser({
+@@ -958,9 +1080,14 @@ export function WorkspaceBrowser({
+     )
+   }, [currentBlank, flatMemberIds, list.byId, orderBy, orderState, sessionOrderByAccount])
++  // The accounts whose order is live right now. Same key set as the
++  // `retainAccountKeys` effect below — the date-folder Workspaces of the chat
++  // flow are excluded — or the two would disagree about which keys exist: this
++  // value is what `syncSessionOrders` writes back, so an unfiltered one would
++  // re-create the very chat keys that effect has just retired.
+   const activeSessionOrders = useMemo<Readonly<Record<string, readonly SessionId[]>>>(() => Object.fromEntries([
+-    ...orderedWorkspaces.map(workspace => [workspace.workspaceId, workspace.sessionIds] as const),
++    ...orderedWorkspaceAreaWorkspaces.map(workspace => [workspace.workspaceId, workspace.sessionIds] as const),
+     [UNGROUPED_KEY, orderedUngroupedSessionIds] as const,
+     [FLAT_SESSION_ORDER_KEY, orderedFlatSessionIds] as const,
+-  ]), [orderedFlatSessionIds, orderedUngroupedSessionIds, orderedWorkspaces])
++  ]), [orderedFlatSessionIds, orderedUngroupedSessionIds, orderedWorkspaceAreaWorkspaces])
+   useEffect(() => {
+     if (workspacePhase !== 'ready') return
+@@ -968,7 +1095,13 @@ export function WorkspaceBrowser({
        UNGROUPED_KEY,
        FLAT_SESSION_ORDER_KEY,
 -      ...workspaces.map(workspace => workspace.workspaceId),
@@ -269,7 +286,7 @@ index 3c900b2..5588643 100644
 +  }, [actions.retainAccountKeys, workspacePhase, workspaces, chatRoot])
    useEffect(() => {
      if (list.phase !== 'ready' || workspaceReady || orderBy !== 'manual' || currentBlank === undefined) return
-@@ -1339,84 +1467,121 @@ export function WorkspaceBrowser({
+@@ -1339,84 +1472,122 @@ export function WorkspaceBrowser({
        </div>}
  
 -      {/* Always-mounted seat keeps the region's flex slot while the list
@@ -377,15 +394,15 @@ index 3c900b2..5588643 100644
 -              onUnarchive={onSessionUnarchive}
 -              workspaces={workspaces}
 -              archivedSessionIds={archivedSessionIds}
--              archivedFilter={archivedFilter}
--              query={normalizedQuery}
--              remote={remoteSearch}
--              resultLimit={searchResultLimit}
 +              useWorkspaces={useWorkspaces}
 +              useChat={useChat}
 +              usePanelInfo={usePanelInfo}
 +              renderSlot={renderSlot}
 +              currentId={mainSessionId}
+               archivedFilter={archivedFilter}
+-              query={normalizedQuery}
+-              remote={remoteSearch}
+-              resultLimit={searchResultLimit}
 +              deletedSessionIds={deletedIds}
 +              open={guardedOpen}
 +              onRenameRequest={requestSessionRename}

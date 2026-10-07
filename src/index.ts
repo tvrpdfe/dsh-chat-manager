@@ -20,6 +20,8 @@ import { collisionSlug, cleanSlug } from './shared/slug.ts'
 import { planSessionArtifactRemoval } from './shared/removal-plan.ts'
 import { ensureWindowsFolderAccess } from './win-folder-access.ts'
 import type { ArchivedChatRow, ChatFolderEntry, ChatSearchHit } from './shared/chat.ts'
+import { chatFolderSectionText, chatFolderStateFor, chatPromptTrigger, SUBAGENT_ORIGIN } from './shared/prompt-section.ts'
+import type { ChatFolderSectionContext, ChatSessionHeader, DeliveredMessage } from './shared/prompt-section.ts'
 
 const name = 'dsh-chat-manager'
 
@@ -80,6 +82,15 @@ const CHAT_FOLDER_SWEEP_BUDGET_MS = 30_000
  * be checked in time still gets the ACE on a later start or chat.
  */
 const CHAT_FOLDER_ROUTE_BUDGET_MS = 10_000
+
+/**
+ * Wall-clock budget for the platform lookup that names the Documents folder
+ * (`powershell` on Windows, `xdg-user-dir` on Linux). It runs on the startup
+ * path — BEFORE the folder sweep and its budget — so a wedged helper must fall
+ * back to `~/Documents` instead of holding the Host's start forever. A lookup
+ * that answers nothing at all already takes that same fallback.
+ */
+const DOCUMENTS_LOOKUP_TIMEOUT_MS = 10_000
 
 /** Workspace-item shape read from the registry (leaf fields only). */
 interface WorkspaceView {
@@ -165,9 +176,10 @@ interface HostCtx extends Record<string, any> {
   agentDefaultModel: { currentSelection: () => { provider?: string; model?: string; reasoningEffort?: unknown } | null }
 }
 
-interface SessionEventData {
-  source?: { kind?: string }
-  content?: Array<{ type?: string; text?: string }>
+/** One `agent/inbox/inserted` payload, as this plugin reads it. */
+interface AgentInboxInserted {
+  agent?: { id?: string; session?: { id?: string; header?: ChatSessionHeader } }
+  message?: DeliveredMessage
 }
 
 function apply(ctx: HostCtx): void {
@@ -205,17 +217,31 @@ function apply(ctx: HostCtx): void {
     return path.normalize(value)
   }
 
+  /**
+   * Windows PowerShell by absolute path. PATH is not trusted for a program the
+   * Host runs on its startup path — the same rule the ACL tools follow.
+   * @returns the absolute path of `powershell.exe`.
+   */
+  function windowsPowerShell(): string {
+    const systemRoot = process.env.SystemRoot ?? process.env.windir ?? 'C:\\Windows'
+    return path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+  }
+
   function resolveDocuments(): string {
     if (chatState.documentsRoot) return chatState.documentsRoot
     if (process.platform === 'win32') {
-      const r = spawnSync('powershell', ['-NoProfile', '-Command', '[Environment]::GetFolderPath("MyDocuments")'], { encoding: 'utf8' })
+      const r = spawnSync(windowsPowerShell(), ['-NoProfile', '-Command', '[Environment]::GetFolderPath("MyDocuments")'], {
+        encoding: 'utf8',
+        windowsHide: true,
+        timeout: DOCUMENTS_LOOKUP_TIMEOUT_MS,
+      })
       const out = (r.stdout || '').trim()
       if (r.status === 0 && out) {
         chatState.documentsRoot = out
         return out
       }
     } else if (process.platform === 'linux') {
-      const r = spawnSync('xdg-user-dir', ['DOCUMENTS'], { encoding: 'utf8' })
+      const r = spawnSync('xdg-user-dir', ['DOCUMENTS'], { encoding: 'utf8', timeout: DOCUMENTS_LOOKUP_TIMEOUT_MS })
       const out = (r.stdout || '').trim()
       // `xdg-user-dir` answers `$HOME` when the XDG user dirs are unconfigured,
       // and `$HOME` is not a Documents folder: only an absolute path that is
@@ -229,6 +255,11 @@ function apply(ctx: HostCtx): void {
       }
     }
     chatState.documentsRoot = path.join(os.homedir(), 'Documents')
+    // The fallback is silent no longer: a Host whose platform lookup failed (or
+    // timed out within DOCUMENTS_LOOKUP_TIMEOUT_MS) chats under `~/Documents`
+    // instead of the user's real Documents folder, and that must be visible in
+    // the log rather than inferred from where the folders appeared.
+    console.warn(`[dsh-chat-manager] the platform named no Documents folder; using ${chatState.documentsRoot}`)
     return chatState.documentsRoot
   }
 
@@ -244,26 +275,195 @@ function apply(ctx: HostCtx): void {
     return path.join(dateFolder, '.dsh-chat.json')
   }
 
-  function readRegistry(dateFolder: string): Record<string, ChatFolderEntry> {
+  /**
+   * How a registry read ended, which is what decides whether a write may follow.
+   *  - `ok`: parsed.
+   *  - `absent`: no file — an empty registry, safe to create.
+   *  - `unreadable`: the file is there but could not be READ (permissions, a
+   *    transient lock, IO). Its content is unknown, so a merge into it must not
+   *    happen: writing would replace whatever it holds with the caller's one
+   *    entry.
+   *  - `corrupt`: read fine, parsed not. The bytes are quarantined before the
+   *    file is rebuilt (see {@link editRegistry}).
+   */
+  type RegistryRead =
+    | { status: 'ok'; sessions: Record<string, ChatFolderEntry> }
+    | { status: 'absent' }
+    | { status: 'unreadable'; detail: string }
+    | { status: 'corrupt' }
+
+  /**
+   * Read one date folder's registry, keeping the failure kinds apart.
+   * @param dateFolder - the dated folder to read.
+   * @returns how the read ended, with the entries when it parsed.
+   */
+  function readRegistryFile(dateFolder: string): RegistryRead {
+    const file = registryFile(dateFolder)
+    let raw: string
     try {
-      const raw = JSON.parse(fs.readFileSync(registryFile(dateFolder), 'utf8')) as { sessions?: Record<string, ChatFolderEntry> }
-      const sessions = raw && typeof raw.sessions === 'object' && raw.sessions !== null ? raw.sessions : {}
-      return sessions
+      raw = fs.readFileSync(file, 'utf8')
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'ENOENT') return { status: 'absent' }
+      return { status: 'unreadable', detail: errorMessage(err) }
+    }
+    try {
+      const parsed = JSON.parse(raw) as { sessions?: Record<string, ChatFolderEntry> }
+      const sessions = parsed && typeof parsed.sessions === 'object' && parsed.sessions !== null ? parsed.sessions : {}
+      return { status: 'ok', sessions }
     } catch {
-      return {}
+      return { status: 'corrupt' }
     }
   }
 
-  function writeRegistry(dateFolder: string): void {
-    const sessions: Record<string, ChatFolderEntry> = {}
-    for (const [sid, entry] of chatState.folders) {
-      if (normalizePathLower(path.dirname(entry.folder)) === normalizePathLower(dateFolder)) sessions[sid] = entry
-    }
+  /** Entries of one date folder's registry (anything but a clean parse reads as empty). */
+  function readRegistry(dateFolder: string): Record<string, ChatFolderEntry> {
+    const read = readRegistryFile(dateFolder)
+    return read.status === 'ok' ? read.sessions : {}
+  }
+
+  /** Size and mtime of the registry file, as one comparable stamp (`'absent'` when missing). */
+  function registryStamp(file: string): string {
     try {
-      fs.writeFileSync(registryFile(dateFolder), JSON.stringify({ sessions }, null, 2), 'utf8')
+      const stat = fs.statSync(file)
+      return `${stat.size}:${stat.mtimeMs}`
+    } catch {
+      return 'absent'
+    }
+  }
+
+  /**
+   * Replace one date folder's registry with `sessions`, atomically.
+   *
+   * Atomicity is not decoration: the file is shared by every Host on this chat
+   * root (Web and desktop are separate processes, see AGENTS.md), and a reader
+   * that catches a half-written file parses nothing — it would then merge its
+   * own entries into an empty set and drop the other Host's. Writing a sibling
+   * temp file and renaming it over the target means a reader sees either the
+   * old file or the new one, never a torn one. The temp file's name is fixed by
+   * the boot sweep (`scanChatFolders` removes leftovers) and ignored by the
+   * window probe's stray-file check.
+   * @param file - the registry path.
+   * @param sessions - the complete entry set to publish.
+   */
+  function writeRegistryAtomically(file: string, sessions: Record<string, ChatFolderEntry>): void {
+    const temp = `${file}.tmp-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
+    try {
+      fs.writeFileSync(temp, JSON.stringify({ sessions }, null, 2), 'utf8')
+      fs.renameSync(temp, file)
     } catch (err) {
+      try { fs.rmSync(temp, { force: true }) } catch { /* the temp file is inert anyway */ }
       console.warn('[dsh-chat-manager] registry write failed:', err)
     }
+  }
+
+  /** Age above which a registry temp file can only be an interrupted write. */
+  const REGISTRY_TEMP_STALE_MS = 60_000
+
+  /**
+   * Remove stale registry temp files from one date folder.
+   *
+   * `writeRegistryAtomically` writes `<registry>.tmp-…` and renames it away, so
+   * anything left is the residue of a process that died in between (or of a
+   * rename that failed). Nothing reads those bytes, and they sit in a folder the
+   * chat probe watches for stray files, so the boot sweep clears the old ones;
+   * a young temp file is left alone because another Host may be writing it right
+   * now (deleting that one would fail its rename).
+   * @param dateFolder - the dated folder to sweep.
+   */
+  function sweepRegistryTemps(dateFolder: string): void {
+    let names: string[]
+    try {
+      names = fs.readdirSync(dateFolder)
+    } catch {
+      return
+    }
+    for (const name of names) {
+      if (!/^\.dsh-chat\.json\.tmp-/.test(name)) continue
+      const file = path.join(dateFolder, name)
+      try {
+        if (Date.now() - fs.statSync(file).mtimeMs < REGISTRY_TEMP_STALE_MS) continue
+        fs.rmSync(file, { force: true })
+        console.warn(`[dsh-chat-manager] removed a leftover registry temp file: ${file}`)
+      } catch { /* a concurrent removal is the swept answer */ }
+    }
+  }
+
+  /**
+   * Apply ONE change to a date folder's registry file, as a read-modify-write.
+   *
+   * The file is shared by every Host running this plugin: the Web profile and
+   * the desktop profile are separate processes over one chat root (same code,
+   * different profile), and each only knows the chats IT has registered since
+   * its own start. Rebuilding the file from this process's map alone therefore
+   * erased the other Host's entries — and an entry that vanishes puts its
+   * folder back in reach of `uniqueSlug`'s adoption rule, i.e. two chats sharing
+   * one folder. Only the entries the caller names are touched, and the write is
+   * atomic (see {@link writeRegistryAtomically}).
+   *
+   * Three endings, three behaviours: a clean read is edited; a MISSING file is
+   * created; a file that could not be READ is left completely alone (its content
+   * is unknown, so merging into it would destroy it — a warning is the honest
+   * answer); a file that parsed badly is quarantined as `.dsh-chat.json.corrupt-<ts>`
+   * first, so the bytes survive even though the entries they described do not
+   * come back from anywhere.
+   *
+   * The stamp check is optimistic concurrency: if the other Host wrote between
+   * our read and our replace, this write would drop its entry, so the read is
+   * redone on the newer content instead. Three attempts, then it warns — a
+   * registry entry that loses this race costs a chat its folder hint (and its
+   * folder becomes adoptable), which is worth a warning but not a crash.
+   * @param dateFolder - the dated folder whose registry is written.
+   * @param edit - the one change to apply to the entries read from disk.
+   */
+  function editRegistry(dateFolder: string, edit: (sessions: Record<string, ChatFolderEntry>) => void): void {
+    const file = registryFile(dateFolder)
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const stamp = registryStamp(file)
+      const read = readRegistryFile(dateFolder)
+      if (read.status === 'unreadable') {
+        console.warn(`[dsh-chat-manager] chat registry could not be read (${read.detail}); leaving it untouched: ${file}`)
+        return
+      }
+      let sessions: Record<string, ChatFolderEntry> = {}
+      if (read.status === 'ok') {
+        sessions = read.sessions
+      } else if (read.status === 'corrupt') {
+        // Quarantine the unreadable bytes before rebuilding: the entries in them
+        // are lost either way (nothing else knows which chat a folder belongs
+        // to), and keeping the file is what lets a person recover them by hand.
+        const quarantine = `${file}.corrupt-${Date.now()}`
+        try {
+          fs.renameSync(file, quarantine)
+          console.warn(`[dsh-chat-manager] chat registry was unreadable; kept it as ${quarantine} and rebuilding`)
+        } catch (err) {
+          console.warn('[dsh-chat-manager] chat registry was unreadable and could not be set aside; leaving it untouched:', errorMessage(err))
+          return
+        }
+      }
+      edit(sessions)
+      if (registryStamp(file) !== stamp) continue
+      writeRegistryAtomically(file, sessions)
+      return
+    }
+    console.warn('[dsh-chat-manager] chat registry kept changing while writing; gave up after 3 attempts:', file)
+  }
+
+  /** Whether another chat this process knows about already registered this folder. */
+  function registeredFolder(folder: string): boolean {
+    for (const entry of chatState.folders.values()) {
+      if (normalizePathLower(entry.folder) === normalizePathLower(folder)) return true
+    }
+    return false
+  }
+
+  /** Whether some registry entry — in this process or on disk — already owns `folder`. */
+  function folderIsRegistered(folder: string, diskSessions: Record<string, ChatFolderEntry>): boolean {
+    if (registeredFolder(folder)) return true
+    for (const entry of Object.values(diskSessions)) {
+      if (entry && typeof entry.folder === 'string' && normalizePathLower(entry.folder) === normalizePathLower(folder)) return true
+    }
+    return false
   }
 
   /**
@@ -285,6 +485,12 @@ function apply(ctx: HostCtx): void {
       if (!/^\d{4}-\d{2}-\d{2}$/.test(d.name)) continue
       const dateFolder = path.join(chatState.root, d.name)
       dateFolders.push(dateFolder)
+      // Leftover registry temp files (an interrupted write: this process's
+      // `writeRegistryAtomically` or a previous Host's) are dead weight in a
+      // folder the probe's stray-file check watches. Only old ones go: a file
+      // younger than a minute may belong to a Host that is writing right now,
+      // and removing that one would fail its rename.
+      sweepRegistryTemps(dateFolder)
       const sessions = readRegistry(dateFolder)
       for (const [sid, entry] of Object.entries(sessions)) {
         if (entry && typeof entry.slug === 'string' && typeof entry.folder === 'string' && !chatState.folders.has(sid)) {
@@ -300,22 +506,50 @@ function apply(ctx: HostCtx): void {
   // spec's 2–4 lowercase hyphenated word range (short sources pad with the
   // stable filler `session`; an empty source starts from `chat`).
 
+  /**
+   * Reserve the first free folder name under the date folder.
+   *
+   * The name is claimed by CREATING the folder in the same synchronous step that
+   * found it free. The earlier existsSync-then-mkdir shape left the whole `await`
+   * of `generateSlug` as a window in which two chats naming folders in one date
+   * folder could choose the same name and both end up registered to one folder;
+   * `mkdirSync` without `recursive` reports the loser's collision as EEXIST, and
+   * the loop sends that chat on to the next candidate (`-2`, `-3`, …, ADR 0001).
+   * @param dateFolder - the dated folder the chat folder belongs in (it exists).
+   * @param slug - the slug to claim, before collisions are resolved.
+   * @returns the slug and the folder this chat now owns.
+   */
   function uniqueSlug(dateFolder: string, slug: string): ChatFolderEntry {
     const words = slug.split('-')
-    let n = 0
-    for (;;) {
+    // Names that were already there when this naming started. Only those are
+    // orphans a chat may adopt (the leftover of a deleted chat, or a folder a
+    // person made). A directory that APPEARS during the search was claimed by
+    // another Host — or by this one, a moment ago — and adopting that is exactly
+    // the "two chats share one folder" case ADR 0001's revision 3 closes.
+    let preexisting: ReadonlySet<string>
+    try {
+      preexisting = new Set(fs.readdirSync(dateFolder))
+    } catch {
+      preexisting = new Set()
+    }
+    for (let n = 0; ; n += 1) {
       const candidate = collisionSlug(words, n)
       const folder = path.join(dateFolder, candidate)
-      if (!fs.existsSync(folder)) return { slug: candidate, folder }
-      let taken = false
-      for (const entry of chatState.folders.values()) {
-        if (normalizePathLower(entry.folder) === normalizePathLower(folder)) {
-          taken = true
-          break
-        }
+      // The registry is re-read per candidate: it is the shared file of every
+      // Host on this chat root, and a name another Host claimed since the last
+      // look must not be adopted just because this process never heard of it.
+      // (One small read per candidate — usually the first one wins.)
+      if (folderIsRegistered(folder, readRegistry(dateFolder))) continue
+      if (preexisting.has(candidate)) return { slug: candidate, folder }
+      try {
+        fs.mkdirSync(folder)
+        return { slug: candidate, folder }
+      } catch (err) {
+        // Lost the claim to a chat that got here in the same instant: the
+        // folder is theirs, so this one moves on to the next name.
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue
+        throw err
       }
-      if (!taken) return { slug: candidate, folder }
-      n += 1
     }
   }
 
@@ -335,7 +569,11 @@ function apply(ctx: HostCtx): void {
             id: crypto.randomUUID(),
             role: 'user',
             content: [{ type: 'text', text: `Name a chat folder from this first message:\n${String(text).slice(0, 800)}` }],
-            source: { kind: 'plugin', plugin: 'dsh-chat-manager' },
+            // Producer-owned source kind, the shape 0.2.x writes for its own
+            // helper calls (`session-title-llm` writes `{ kind:
+            // 'dsh-session-title-llm' }`). `{ kind: 'plugin', plugin: … }` is the
+            // released V2/V3 wrapper, which the format migration has to rewrite.
+            source: { kind: 'dsh-chat-manager' },
           }],
           temperature: 0.2,
           maxTokens: 24,
@@ -359,58 +597,86 @@ function apply(ctx: HostCtx): void {
   }
 
   // ---- first-message hook: create the slug subfolder ----
-  ctx.on('session/event', (session: { id: string; header?: { cwd?: string } }, event: { type?: string; data?: SessionEventData }) => {
-    if (event.type !== 'user/message') return
-    const data = event.data
-    if (!data || data.source == null || data.source.kind !== 'user') return
-    const header = session.header
-    if (!header || header.cwd === undefined || !isUnderChatRoot(header.cwd, chatState.root)) return
-    // Already registered, or a slug generation is still running for this
-    // session ("first user message" is enforced per session: the in-flight
-    // window between the trigger and the registry write must not re-run the
-    // generation for a second user message; the 15s LLM budget makes that
-    // window wide enough to matter).
-    if (chatState.folders.has(session.id) || pendingSlugFor.has(session.id)) return
-    const text = (Array.isArray(data.content) ? data.content : [])
-      .filter((b) => b && b.type === 'text')
-      .map((b) => b.text ?? '')
-      .join(' ')
-      .trim()
-    if (!text) return
-    const dateFolder = header.cwd
-    pendingSlugFor.add(session.id)
+  /**
+   * Start (or skip) the slug-folder setup for one delivered prompt.
+   *
+   * "First user message" is enforced per session here rather than by the
+   * caller: the in-flight window between the trigger and the registry write
+   * must not re-run the generation for a later message (the 15s LLM budget
+   * makes that window wide enough to matter), and two triggers watch the same
+   * delivery.
+   * @param sessionId - the chat session the folder belongs to.
+   * @param dateFolder - that session's workspace (the dated folder).
+   * @param text - the prompt text the folder is named from.
+   */
+  function startChatFolderSlug(sessionId: string, dateFolder: string, text: string): void {
+    if (chatState.folders.has(sessionId) || pendingSlugFor.has(sessionId)) return
+    pendingSlugFor.add(sessionId)
     generateSlug(text)
-      .then((slug) => uniqueSlug(dateFolder, slug))
+      .then((slug) => {
+        // The dated folder is the session's own workspace root and exists by
+        // now; creating it here keeps the claim below independent of that. The
+        // claim itself must stay non-recursive — it needs the EEXIST a
+        // `recursive` mkdir swallows.
+        fs.mkdirSync(dateFolder, { recursive: true })
+        return uniqueSlug(dateFolder, slug)
+      })
       .then(({ slug, folder }) => {
-        try {
-          fs.mkdirSync(folder, { recursive: true })
-        } catch (err) {
-          console.warn('[dsh-chat-manager] slug folder mkdir failed:', err)
-          return
-        }
-        chatState.folders.set(session.id, { slug, folder })
-        writeRegistry(dateFolder)
+        chatState.folders.set(sessionId, { slug, folder })
+        editRegistry(dateFolder, (sessions) => { sessions[sessionId] = { slug, folder } })
         console.log(`[dsh-chat-manager] chat folder ready: ${folder}`)
       })
       .catch((err) => console.warn('[dsh-chat-manager] slug folder setup failed:', err))
-      .finally(() => { pendingSlugFor.delete(session.id) })
+      .finally(() => { pendingSlugFor.delete(sessionId) })
+  }
+
+  /**
+   * Delivery trigger. This is the one point DSH reaches before the step's
+   * prompt assembly: `Agent.send()` emits `agent/inbox/inserted` inside its
+   * splice and wakes the driver afterwards, and the assembling `preStep` runs
+   * inside that wake. The durable append is already too late for the step it
+   * belongs to — `AgentLoop.step()` commits the `system/message` and then
+   * appends the claimed `user/message`, both AFTER the assembly — so the
+   * append-time trigger below left the first prompt of the turn with an empty
+   * section: the model wrote its file into the date folder and moved it into
+   * the chat folder only once the next step's prompt named that folder.
+   */
+  ctx.on('agent/inbox/inserted', (payload: AgentInboxInserted) => {
+    const session = payload?.agent?.session
+    const sessionId = session?.id ?? payload?.agent?.id
+    if (sessionId === undefined) return
+    const trigger = chatPromptTrigger(payload?.message, session?.header, chatState.root)
+    if (!trigger) return
+    startChatFolderSlug(sessionId, trigger.dateFolder, trigger.text)
+  })
+
+  /**
+   * Fallback for a delivery that reaches the log without the inbox event (a
+   * producer that appends its own `user/message`): it still gets its folder,
+   * only without the pre-assembly marker of this round.
+   */
+  ctx.on('session/event', (session: { id: string; header?: ChatSessionHeader }, event: { type?: string; data?: DeliveredMessage }) => {
+    if (event.type !== 'user/message') return
+    const trigger = chatPromptTrigger(event.data, session.header, chatState.root)
+    if (!trigger) return
+    startChatFolderSlug(session.id, trigger.dateFolder, trigger.text)
   })
 
   // ---- system-prompt section: chat sessions write into their slug folder ----
+  // Session-id read, the folder/hold-off decision, and the child rule all live
+  // in shared/prompt-section.ts (incidents: `agent.sessionId`; the append-time
+  // trigger). The state rule only needs the two lookups below: the registry and
+  // this process's in-flight set. A session whose folder setup failed therefore
+  // falls through to `none` and keeps the old behavior instead of holding the
+  // model off forever.
   ctx.effect(() => ctx.systemPrompt.section({
     name: 'dsh-chat-manager/chat-folder',
     order: 150,
-    text: (context: { agent?: { sessionId?: string }; sessionId?: string }) => {
-      const sid = context.agent != null ? context.agent.sessionId : context.sessionId
-      if (sid == null) return ''
-      const entry = chatState.folders.get(sid)
-      if (!entry) return ''
-      return [
-        'You are working in a chat session. Do not read or write files directly in the chat working directory.',
-        `Put all file input/output for this chat into the chat folder: ${entry.folder}`,
-        'The chat folder is the workspace root for every file operation in this session (relative paths resolve against it).',
-      ].join('\n')
-    },
+    text: (context: ChatFolderSectionContext) => chatFolderSectionText(context, (session) => chatFolderStateFor(
+      session,
+      (id) => chatState.folders.get(id)?.folder,
+      (id) => pendingSlugFor.has(id),
+    )),
   }), 'dsh-chat-manager: system prompt section')
 
   // ---- HTTP helpers ----
@@ -464,22 +730,31 @@ function apply(ctx: HostCtx): void {
             if (!workspaceTitleOfSession.has(sessionId)) workspaceTitleOfSession.set(sessionId, workspace.title)
           }
         }
-        let archivedRows: ArchivedChatRow[] = []
+        // The archive ledger is the list's authority, so the rows exist BEFORE
+        // the titles are read: a failed title read then costs the titles, not
+        // the rows. (The older shape caught the failure into an empty list, so
+        // one bad read showed "no archived sessions" while the ledger listed
+        // some — the same "warn + empty 200" this plugin refuses elsewhere.)
+        let archivedRows: ArchivedChatRow[] = archived.map((sessionId) => ({
+          sessionId,
+          title: '',
+          workspaceTitle: workspaceTitleOfSession.get(sessionId) ?? '',
+          updatedAt: 0,
+        }))
         try {
           const results = await ctx.sessionQuery.readTitleSnapshots(archived)
-          archivedRows = results.map((r) => {
+          const titleOfRow = new Map(archivedRows.map((row) => [row.sessionId, row]))
+          for (const r of results) {
+            const row = titleOfRow.get(r.sessionId)
+            if (row === undefined) continue
             const value = r.status === 'fulfilled' ? r.value : undefined
             // Keep rejected rows too: the client falls back to the untitled
             // placeholder instead of dropping the entry (spec: 缺失者回退标题
             // 占位), so a broken snapshot never hides an archived session.
-            return {
-              sessionId: r.sessionId,
-              title: (value && value.title && value.title.title) || '',
-              workspaceTitle: workspaceTitleOfSession.get(r.sessionId) ?? '',
-              updatedAt: (value && value.title && value.title.updatedAt)
-                ?? (value && value.session ? (value.session.createdAt ?? 0) : 0),
-            }
-          })
+            row.title = (value && value.title && value.title.title) || ''
+            row.updatedAt = (value && value.title && value.title.updatedAt)
+              ?? (value && value.session ? (value.session.createdAt ?? 0) : 0)
+          }
         } catch (err) {
           console.warn('[dsh-chat-manager] title snapshot read failed:', errorMessage(err))
         }
@@ -551,7 +826,7 @@ function apply(ctx: HostCtx): void {
         const records = await ctx.sessionQuery.listSessions()
         const chatRecords = records.filter(
           (r) => r.header && r.header.cwd && isUnderChatRoot(r.header.cwd, chatState.root)
-            && r.header.origin !== 'subagent'
+            && r.header.origin !== SUBAGENT_ORIGIN
             && !archived.has(r.header.id),
         )
         const byId = new Map(chatRecords.map((r) => [r.header.id, r]))
@@ -740,11 +1015,14 @@ function apply(ctx: HostCtx): void {
         }
         // 4) Chat-folder registry cleanup (best-effort; the folder itself
         //    stays on disk). Runs before the archive removal below, so an
-        //    unexpected failure here also leaves the archive untouched.
+        //    unexpected failure here also leaves the archive untouched. The id
+        //    is named explicitly: the registry is a read-modify-write shared
+        //    with the other Host, so "absent from this process's map" is not
+        //    enough to retire an entry.
         const entry = chatState.folders.get(sid)
         if (entry) {
           chatState.folders.delete(sid)
-          writeRegistry(path.dirname(entry.folder))
+          editRegistry(path.dirname(entry.folder), (sessions) => { delete sessions[sid] })
         }
         // 5) Best-effort projection-cache cleanup. The platform's
         //    session_projcache domain has no prune path (rows are written
@@ -849,11 +1127,13 @@ export { apply, inject, name }
 // Re-exported for the decision-table tests and the ACL acceptance probe: this
 // host cannot run the POSIX branch (or a real icacls/ACL evaluation) under test,
 // so `test/*.test.mjs` pins the pure seams from the built bundle — the
-// session-removal plan, and the DACL reader/decision the Windows folder check
-// is built from — while `.scratch/accept11-acl-deny-shapes.mjs` drives
-// `ensureWindowsFolderAccess` itself (the same bundle the Host runs) against
-// real folders and DSH's own grant.
+// session-removal plan, the chat-folder section text and its delivery trigger
+// (whose assembly/delivery context no probe can read without spending a model
+// turn), and the DACL reader/decision the Windows folder check is built from —
+// while `.scratch/accept11-acl-deny-shapes.mjs` drives `ensureWindowsFolderAccess`
+// itself (the same bundle the Host runs) against real folders and DSH's own grant.
 export { planSessionArtifactRemoval }
+export { chatFolderSectionText, chatFolderState, chatFolderStateFor, chatPromptTrigger, SUBAGENT_ORIGIN } from './shared/prompt-section.ts'
 export {
   ensureWindowsFolderAccess, evaluateDacl, hasTokenGroups, parseDaclSddl, parseOwnSid, parseTokenSids,
   pickSddlLine, planFolderAccess,

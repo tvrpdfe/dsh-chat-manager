@@ -59,6 +59,10 @@ function ledgerState() {
 function ledgerArchived() {
   return ledgerState().archived;
 }
+/** Byte size of one entry, or -1 when it cannot be read. */
+function sizeOf(dir, name) {
+  try { return fs.statSync(path.join(dir, name)).size } catch { return -1 }
+}
 /** Directories on disk for one session id (empty when the log is gone). */
 function dirsOf(id) {
   const out = [];
@@ -66,7 +70,12 @@ function dirsOf(id) {
   for (const slug of fs.readdirSync(SESSIONS)) {
     const dir = path.join(SESSIONS, slug, id);
     try {
-      if (fs.existsSync(dir)) out.push({ dir, files: fs.readdirSync(dir) });
+      if (fs.existsSync(dir)) {
+        const files = fs.readdirSync(dir);
+        // Sizes travel with the names: the round trip must leave the bytes alone
+        // as well, and a truncated or overwritten log keeps its name.
+        out.push({ dir, files, sizes: files.map((name) => sizeOf(dir, name)) });
+      }
     } catch { /* a concurrent removal is the "absent" answer */ }
   }
   return out;
@@ -238,13 +247,16 @@ try {
   // trip, so the durable archive set must come back to EXACTLY the set the probe found.
   check('12 the archive set came back to exactly its starting content (no foreign row touched)', sameSet(ledger2, archivedBefore), `start=${JSON.stringify(archivedBefore)} after=${JSON.stringify(ledger2)}`);
   const filesAfterRestore = dirsOf(sid);
-  // Byte-level "untouched": the same directory must still hold exactly the same file
-  // list as before the archive/restore round trip (an overwritten or truncated log
-  // would keep the directory non-empty and must not pass).
+  // The same directory must still hold exactly the same files with the same
+  // sizes as before the archive/restore round trip: a truncated or overwritten
+  // log keeps its name and its directory non-empty, so both halves are
+  // compared. (This is the spec's "逐文件未被触碰" — the listing plus what the
+  // listing cannot see.)
   const sameDir = filesAfterRestore.length === filesBefore.length
     && filesAfterRestore.length > 0 && filesAfterRestore[0].dir === filesBefore[0].dir;
   const sameFiles = sameDir && filesAfterRestore[0].files.length === filesBefore[0].files.length
-    && filesAfterRestore[0].files.every((f, i) => f === filesBefore[0].files[i]);
+    && filesAfterRestore[0].files.every((f, i) => f === filesBefore[0].files[i])
+    && filesAfterRestore[0].sizes.every((size, i) => size === filesBefore[0].sizes[i]);
   check('13 the log was NOT touched by the restore', sameFiles, `before=${JSON.stringify(filesBefore)} after=${JSON.stringify(filesAfterRestore)}`);
 
   // 5. The row is back where it belongs (the chat pane), with no reload.
