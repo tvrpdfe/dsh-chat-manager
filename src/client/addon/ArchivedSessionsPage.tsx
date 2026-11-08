@@ -120,7 +120,11 @@ export function ArchivedSessionsPage({ t }: ArchivedSessionsPageProps) {
           pendingLabel={t('archived.deleting')}
           cancelLabel={t('cancel')}
           closeLabel={t('close')}
-          onConfirm={() => performSessionDelete(deleteTarget.sessionId as SessionId)}
+          onConfirm={() => performSessionDelete(deleteTarget.sessionId as SessionId, {
+            // Carried into the "stop and delete" confirmation the overlay raises
+            // when the Host refuses the delete for running work.
+            displayTitle: deleteTarget.title,
+          })}
           onClose={() => { setDeleteTarget(null) }}
         />
       )}

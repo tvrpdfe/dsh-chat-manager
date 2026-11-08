@@ -53,7 +53,7 @@ import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { ShortcutCatalogEntry } from '@deepseek-ai/dsh-client-shortcuts/client'
 import type { WorkspaceShortcutState } from '../shortcuts.ts'
 import type { createWorkspaceViewStore } from '../stores.ts'
-import type { ChatManagerState } from '../addon/chat-runtime.ts'
+import type { ChatManagerState, SessionDeleteBusyRequest } from '../addon/chat-runtime.ts'
 import type { ChatSearchHit } from '../../shared/chat.ts'
 
 /**
@@ -458,18 +458,29 @@ export interface DeleteSessionInjected {
 }
 
 /**
- * Delete confirmation dialog share: the pending request, its settlement, and
- * the deletion hop the dialog confirms with.
+ * Delete confirmation dialog share: the pending request, the second
+ * confirmation a busy Session raises, their settlements, and the deletion hops
+ * the dialogs confirm with.
  */
 export interface SessionDeleteConfirmInjected {
   hooks: {
     /** The confirmation asked for, until the dialog consumes or cancels it. */
     deleteRequest: HostObservable<SessionDeleteConfirmRequest | null>
+    /** The "stop and delete" confirmation, raised when the Host answered 409. */
+    deleteBusyRequest: HostObservable<SessionDeleteBusyRequest | null>
   }
   /** Consume or cancel the pending confirmation. */
   settleSessionDelete: () => void
-  /** Delete a Session through the Host route; resolves once the Host is done. */
-  deleteSession: (sessionId: SessionId) => Promise<void>
+  /** Consume or cancel the pending stop-and-delete confirmation. */
+  settleSessionDeleteBusy: () => void
+  /**
+   * Delete a Session through the Host route; resolves once the Host is done.
+   * @param sessionId - the Session to delete.
+   * @param displayTitle - the row title, carried into a busy Session's second confirmation.
+   */
+  deleteSession: (sessionId: SessionId, displayTitle: string) => Promise<void>
+  /** Delete a Session after the Host stops its running work. */
+  stopAndDeleteSession: (sessionId: SessionId, displayTitle: string) => Promise<void>
 }
 
 /** Props of the rename dialog entry in `shell.overlay`. */

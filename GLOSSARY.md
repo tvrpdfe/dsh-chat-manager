@@ -37,7 +37,7 @@ DSH workspace 存储域全局状态中的会话 id 列表（持久化在 `~/.dsh
 _Avoid_: 归档列表、隐藏列表
 
 **删除会话**：
-移除会话的持久化目录（`sessionPersistence.list()`/`stat(id)` 拿到 snapshot —— id 与 cwd 在 `snapshot.header` 上；`locate(header)` 只给**当前格式**的文件名，而迁移过的会话目录里还留着旧世代文件，所以删除单位是会话目录 `<root>/<slug>/<session-id>` 整目录，删前先 `flush()` 落盘、删后复核存在性，拿不出工件则报错而非谎报成功）、调用 `workspace.detachSession` 移除各工作区账目席位、摘除归档集合引用、清理聊天注册；聊天文件夹予以保留。取消归档置于最后，前置失败则不取消（杜绝删失败却回到工作区）。活跃会话的宿主内存态保留至进程重启，期间由客户端 localStorage 墓碑过滤器隐藏其行。**平台分叉**：POSIX 上"本宿主仍持有"的会话直接拒绝删除（其写租约 `session.lock` 就在待删目录里，删掉即放弃跨进程写互斥），Windows 不受影响（租约是内核信号量、无锁文件）。
+移除会话的持久化目录（`sessionPersistence.list()`/`stat(id)` 拿到 snapshot —— id 与 cwd 在 `snapshot.header` 上；工件路径优先取公开的 `snapshot.location.path`，只有它缺失（旧宿主构建、或尚未落盘的 pending 会话）才回退到私有的 `locate(header)`，两者都拿不到就报错而不是谎报成功；`locate` 给**当前格式**的文件名，`snapshot.location.path` 给后端此次选中的 `sourcePath`（迁移过的会话可能是旧世代），两者都只用于**定位会话目录**；而迁移过的会话目录里还留着别的世代文件，所以删除单位是会话目录 `<root>/<slug>/<session-id>` 整目录）、摘除归档集合引用、清理聊天注册（按**全部日期文件夹**扫描，只写"确实读到该 id"的登记；读失败或解析失败只告警、不动那个共享文件）；聊天文件夹予以保留。删除**不是**修复，也不是归档：没有回收站，日志移除后不可恢复。**活动闸门**：删除前问 `workspace/session-activity`（turn / job / schedule / subagent），有活动且调用方未确认时回 409 并列出这些工作；确认后先 `workspace/session-stop`、再 `flush()` 落盘、再删目录并复核存在性（stop 失败即整体 500，日志与账本都不动）。**账目**：对每个工作区**无条件**调用 `detachSession` —— 平台实体的 `sessionIds` getter 会过滤持久化里查不到头的 id，幽灵行在 getter 里"看不见"，但记录仍带着席位。成功后由客户端关闭指向该会话的主视图并写 localStorage 墓碑；宿主内存里的句柄仍保留至进程重启（平台没有按 id 销毁会话的公开 API），残余竞态与边界见 `spec.md` 的已知限制。取消归档置于最后，前置失败则不取消（杜绝删失败却回到工作区）。**平台分叉**：POSIX 上"本宿主仍持有"的会话直接拒绝删除（其写租约 `session.lock` 就在待删目录里，删掉即放弃跨进程写互斥），且这个拒绝发生在活动闸门**之前**（停止工作不释放租约）；Windows 不受租约影响（内核信号量、无锁文件）。
 _Avoid_: 移除会话、清理会话
 
 **聊天根覆盖点**：

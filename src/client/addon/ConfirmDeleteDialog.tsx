@@ -6,6 +6,7 @@
  * archived-session settings page.
  */
 import { useState } from 'react'
+import type { ReactNode } from 'react'
 import { Button, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import css from '../rows/WorkspaceBrowser.module.css'
 
@@ -25,6 +26,8 @@ export interface ConfirmDeleteDialogProps {
   onConfirm: () => Promise<void>
   /** Dismiss the dialog; the caller clears the request it owns. */
   onClose: () => void
+  /** Extra body content (what the deletion will stop), before the status line. */
+  children?: ReactNode
 }
 
 /**
@@ -35,7 +38,7 @@ export interface ConfirmDeleteDialogProps {
  * @returns the open dialog.
  */
 export function ConfirmDeleteDialog({
-  title, description, confirmLabel, pendingLabel, cancelLabel, closeLabel, onConfirm, onClose,
+  title, description, confirmLabel, pendingLabel, cancelLabel, closeLabel, onConfirm, onClose, children,
 }: ConfirmDeleteDialogProps) {
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -75,6 +78,7 @@ export function ConfirmDeleteDialog({
         </>
       )}
     >
+      {children}
       {deleting && <div className={css.deleteStatus} role="status">{pendingLabel}</div>}
       {error !== null && <div className={css.renameError} role="alert">{error}</div>}
     </Modal>

@@ -20,3 +20,7 @@ node_modules/
 
 # one probe run's raw output, kept locally as evidence
 .scratch/review-probe-out/
+
+.workbuddy
+.claude
+.agents

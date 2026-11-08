@@ -67,6 +67,14 @@ export const zh = {
   // and in en alike — the two dialogs must not drift apart.
   'delete.session.desc': '将删除会话“{name}”的聊天记录。其文件夹会保留在磁盘上。此操作不可撤销。',
   'delete.session.pending': '正在删除会话…',
+  // The second confirmation a busy Session raises. Its activity lines reuse
+  // `archive.confirm.*` — the same "work that will be stopped" — while the
+  // title and verb must not say archive: a delete has no restore path.
+  'delete.busy.title': '停止并删除此会话？',
+  'delete.busy.desc': '“{name}”仍有正在进行的工作。删除会先停止这些工作；此操作不可撤销，被停止的工作不会自动继续。',
+  'delete.busy.activity': '将被停止的工作',
+  'delete.busy.action': '停止并删除',
+  'delete.busy.pending': '正在停止并删除…',
   'chat.section': '聊天',
   'chat.add': '新建聊天',
   'chat.empty': '暂无聊天',
@@ -197,6 +205,13 @@ export const en = {
   'delete.session': 'Delete session',
   'delete.session.desc': 'This deletes the conversation record of “{name}”. Its folder is kept on disk. This cannot be undone.',
   'delete.session.pending': 'Deleting session…',
+  // See the zh note: activity lines are shared with the archive dialog, the
+  // title and verb are not.
+  'delete.busy.title': 'Stop and delete this session?',
+  'delete.busy.desc': '“{name}” still has work in progress. Deleting stops it first; this cannot be undone, and the stopped work will not resume on its own.',
+  'delete.busy.activity': 'Work that will be stopped',
+  'delete.busy.action': 'Stop and delete',
+  'delete.busy.pending': 'Stopping and deleting…',
   'chat.section': 'Chats',
   'chat.add': 'New chat',
   'chat.empty': 'No chats yet',

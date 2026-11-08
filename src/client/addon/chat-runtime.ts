@@ -9,6 +9,7 @@
  * until the Host process restart removes it from the baseline for good.
  */
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
+import type { SessionActivity } from '@deepseek-ai/dsh-api-workspace-controller/client'
 import { isUnderChatRoot } from '../../shared/paths.ts'
 import { readArchivedChatRows } from '../../shared/chat.ts'
 import type { ArchivedChatRow, ChatFolderEntry } from '../../shared/chat.ts'
@@ -154,6 +155,20 @@ export function refreshChatState(): Promise<ChatManagerState> {
   })
 }
 
+/** A rejected plugin route: the Host's status and parsed body travel with the message. */
+export class RpcError extends Error {
+  override readonly name = 'RpcError'
+
+  /**
+   * @param message - the Host's `error` text, or the status line when it sent none.
+   * @param status - HTTP status the route answered.
+   * @param payload - parsed JSON body (null when the body was not JSON).
+   */
+  constructor(message: string, readonly status: number, readonly payload: unknown) {
+    super(message)
+  }
+}
+
 /** POST one JSON payload to a same-origin plugin route; rejects with the host error text. */
 export async function rpcPost(pathName: string, payload: unknown): Promise<unknown> {
   const res = await fetch(pathName, {
@@ -161,14 +176,15 @@ export async function rpcPost(pathName: string, payload: unknown): Promise<unkno
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(payload ?? {}),
   })
-  let data: { error?: unknown } | null = null
+  let data: { error?: unknown; active?: unknown; activity?: unknown } | null = null
   try {
     data = await res.json()
   } catch {
     // non-JSON error body: fall through to the status message
   }
   if (!res.ok) {
-    throw new Error(data && typeof data.error === 'string' ? data.error : `request failed (${res.status})`)
+    const message = data && typeof data.error === 'string' ? data.error : `request failed (${res.status})`
+    throw new RpcError(message, res.status, data)
   }
   return data ?? {}
 }
@@ -179,9 +195,89 @@ export function setRefreshSessions(fn: (() => void) | null): void {
   refreshSessionsFn = fn
 }
 
-/** Run the full delete choreography and refresh the shared chat state. */
-export async function performSessionDelete(sessionId: SessionId): Promise<void> {
-  await rpcPost('/api/chat-manager/delete-session', { sessionId })
+/** The client entry's main-view closer, wired while the UI is mounted. */
+let forgetSessionFn: ((sessionId: SessionId) => void) | null = null
+
+/**
+ * Wire the main-view closer: a deleted session has no restore path (unlike an
+ * archive), so the conversation panel must not stay on it.
+ * @param fn - the closer, or null when the UI unmounts.
+ */
+export function setForgetSession(fn: ((sessionId: SessionId) => void) | null): void {
+  forgetSessionFn = fn
+}
+
+/** A delete the Host refused because the session still has running work. */
+export interface SessionDeleteBusyRequest {
+  readonly sessionId: SessionId
+  /** The row's display title, named in the second confirmation. */
+  readonly displayTitle: string
+  readonly activity: SessionActivity[]
+}
+
+/**
+ * The pending "stop and delete" confirmation. Module-level on purpose: the
+ * first dialog closes the moment the Host answers 409, and the second one must
+ * outlive it (and the settings page that may have raised the delete).
+ */
+export const sessionDeleteBusySource = createSource<SessionDeleteBusyRequest | null>(null)
+
+/** Whether a 409 body names the work a confirmed delete would stop. */
+function isBusyPayload(payload: unknown): payload is { active: true; activity: SessionActivity[] } {
+  if (payload === null || typeof payload !== 'object') return false
+  const record = payload as { active?: unknown; activity?: unknown }
+  return record.active === true && Array.isArray(record.activity)
+}
+
+/** Caller choices for {@link performSessionDelete}. */
+export interface SessionDeleteOptions {
+  /** The row's display title, carried into the second confirmation. */
+  readonly displayTitle?: string
+  /** The person confirmed stopping the session's running work. */
+  readonly stopActivity?: boolean
+}
+
+/**
+ * Run the full delete choreography and refresh the shared chat state.
+ *
+ * A 409 is not a failure: the Host named the work that still runs, so this
+ * reports it through {@link sessionDeleteBusySource} and resolves — the first
+ * confirmation closes, the "stop and delete" one opens, and the retry carries
+ * `stopActivity`. Everything else rejects with the Host's message.
+ * @param sessionId - the session to delete.
+ * @param options - the row title and whether to stop running work.
+ */
+export async function performSessionDelete(
+  sessionId: SessionId,
+  options: SessionDeleteOptions = {},
+): Promise<void> {
+  try {
+    await rpcPost('/api/chat-manager/delete-session', {
+      sessionId,
+      ...(options.stopActivity === true ? { stopActivity: true } : {}),
+    })
+  } catch (err) {
+    if (err instanceof RpcError && err.status === 409 && options.stopActivity !== true && isBusyPayload(err.payload)) {
+      sessionDeleteBusySource.set({
+        sessionId,
+        displayTitle: options.displayTitle ?? '',
+        activity: err.payload.activity,
+      })
+      return
+    }
+    throw err
+  }
+  sessionDeleteBusySource.set(null)
+  // Before the baseline refresh: that refresh only drops the row, it does not
+  // release the main-view retain, so the panel would otherwise stay on a
+  // session that no longer exists. The Host has already deleted it, so a
+  // throwing closer must not turn that success into a failed confirmation: it
+  // would skip the tombstone and leave the deleted row visible.
+  try {
+    forgetSessionFn?.(sessionId)
+  } catch (err) {
+    console.warn('session main view could not be closed after delete:', err)
+  }
   markSessionDeleted(sessionId)
   if (refreshSessionsFn !== null) refreshSessionsFn()
   await refreshChatState().catch(() => {})

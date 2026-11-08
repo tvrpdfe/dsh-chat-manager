@@ -65,7 +65,7 @@ import { WorkspacePicker } from './WorkspacePicker.tsx'
 import { ArchivedSessionsPage } from './addon/ArchivedSessionsPage.tsx'
 import {
   chatManagerEn, chatManagerZh, chatRuntimeSource, chatStateSource, performSessionDelete,
-  refreshChatState, rpcPost, setRefreshSessions,
+  refreshChatState, rpcPost, sessionDeleteBusySource, setForgetSession, setRefreshSessions,
 } from './addon/chat-runtime.ts'
 import type { ChatManagerKey } from './addon/chat-runtime.ts'
 import { samePath } from '../shared/paths.ts'
@@ -153,7 +153,13 @@ export function apply(ctx: Context): void {
   // callback instead of leaving a stale one holding this instance's `sessions`.
   ctx.effect(() => {
     setRefreshSessions(() => { void sessions.refresh() })
-    return () => { setRefreshSessions(null) }
+    // A delete is terminal: the conversation panel must not stay on a session
+    // the Host can no longer list (an archive, by contrast, can be restored).
+    setForgetSession((sessionId) => { uiWorkspace.forgetSession(sessionId) })
+    return () => {
+      setRefreshSessions(null)
+      setForgetSession(null)
+    }
   }, 'dsh-chat-manager: session refresh hook')
   void refreshChatState().catch(() => {})
   // `refreshChatState` already retries a few times, but a page whose boot pull
@@ -373,11 +379,14 @@ export function apply(ctx: Context): void {
     requestSessionDelete: (sessionId, displayTitle) => { deleteRequest.set({ sessionId, displayTitle }) },
   })
   const deleteConfirmInjected = (): SessionDeleteConfirmInjected => ({
-    hooks: { deleteRequest },
+    hooks: { deleteRequest, deleteBusyRequest: sessionDeleteBusySource },
     settleSessionDelete: () => { deleteRequest.set(null) },
+    settleSessionDeleteBusy: () => { sessionDeleteBusySource.set(null) },
     // The tombstone plus baseline refresh live in the shared choreography, so a
     // delete from the settings page leaves every list in the same state.
-    deleteSession: performSessionDelete,
+    deleteSession: (sessionId, displayTitle) => performSessionDelete(sessionId, { displayTitle }),
+    stopAndDeleteSession: (sessionId, displayTitle) =>
+      performSessionDelete(sessionId, { displayTitle, stopActivity: true }),
   })
   // Each registration declares its owned children in the same call; slot
   // injection follows both the owner and declaration HMR lifetimes.

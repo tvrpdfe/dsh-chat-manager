@@ -80,6 +80,13 @@ export interface UiWorkspace {
    */
   unarchiveSession(sessionId: SessionId): Promise<void>
   /**
+   * Drop the main view when it is showing a Session that no longer exists.
+   * Deletion has no restore path (unlike archive), so the conversation panel
+   * must not keep rendering a row the Host can never list again.
+   * @param sessionId - the Session the Host just deleted.
+   */
+  forgetSession(sessionId: SessionId): void
+  /**
    * Pin a Session on the Host, then lead it in its accounts' saved orders
    * (its Workspace group or Ungrouped, and the flat list). The order write
    * reads the memberships current at completion, so reorders that landed
@@ -311,6 +318,14 @@ class UiWorkspaceService extends Service implements UiWorkspace {
 
   async unarchiveSession(sessionId: SessionId): Promise<void> {
     await this.workspaces.unarchiveSession(sessionId)
+  }
+
+  forgetSession(sessionId: SessionId): void {
+    // `mainReference` is the authoritative "retained by the main view" handle
+    // (and the thing `clearMain` releases); `selection` may also hold a
+    // subagent address or a restored snapshot, so it is not the test here.
+    if (this.mainReference?.sessionId !== sessionId) return
+    this.clearMain()
   }
 
   async pinSession(sessionId: SessionId): Promise<void> {

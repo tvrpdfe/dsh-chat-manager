@@ -18,6 +18,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { isUnderChatRoot, normalizePathLower } from './shared/paths.ts'
 import { collisionSlug, cleanSlug } from './shared/slug.ts'
 import { planSessionArtifactRemoval } from './shared/removal-plan.ts'
+import { pickSessionArtifactPath, planActivityGate, planDeleteAccounting } from './shared/delete-plan.ts'
+import type { AccountingRegistry, SessionActivity } from './shared/delete-plan.ts'
 import { ensureWindowsFolderAccess } from './win-folder-access.ts'
 import type { ArchivedChatRow, ChatFolderEntry, ChatSearchHit } from './shared/chat.ts'
 import { chatFolderSectionText, chatFolderStateFor, chatPromptTrigger, SUBAGENT_ORIGIN } from './shared/prompt-section.ts'
@@ -84,6 +86,17 @@ const CHAT_FOLDER_SWEEP_BUDGET_MS = 30_000
 const CHAT_FOLDER_ROUTE_BUDGET_MS = 10_000
 
 /**
+ * Bounded settlement wait after `workspace/session-stop` on the delete route:
+ * how many times the activity gate is re-asked, and the pause between asks.
+ * The platform issues stops without waiting for running work to settle, so a
+ * short wait keeps a winding-down turn from writing into the directory the
+ * delete removes. It is a best-effort narrowing, not a guarantee — see the
+ * known leftover in `spec.md`.
+ */
+const DELETE_STOP_SETTLE_ATTEMPTS = 4
+const DELETE_STOP_SETTLE_MS = 250
+
+/**
  * Wall-clock budget for the platform lookup that names the Documents folder
  * (`powershell` on Windows, `xdg-user-dir` on Linux). It runs on the startup
  * path — BEFORE the folder sweep and its budget — so a wedged helper must fall
@@ -147,21 +160,38 @@ interface HostCtx extends Record<string, any> {
       revision: unknown
       eventCount?: number
       sizeBytes?: number
+      /** Backend-resolved artifact location (public since 0.2.2; absent on older builds). */
+      location?: { kind?: string; path?: string }
     }>>
     /** Direct lookup for one stored Session by id (absent when it does not exist). */
     stat: (id: string) => Promise<{
       header: { id: string; cwd: string }
       revision: unknown
+      /** `undefined` for a pending session the backend has not materialized yet. */
+      location?: { kind?: string; path?: string }
     } | undefined>
     /**
      * Backend artifact mapping (`{ kind, path }`) from a stored header. Not
      * part of the abstract service API — it is the JSONL backend's own
-     * refusal-diagnostics hook, so callers must treat it as optional.
+     * refusal-diagnostics hook, so callers must treat it as optional and
+     * prefer `snapshot.location`.
      */
     locate?: (meta: { id: string; cwd: string }) => { kind?: string; path?: string } | undefined
     /** Durability barrier: every active write handle drains and materializes. */
     flush: () => Promise<void>
   }
+  /**
+   * Cordis event dispatch, used for the platform's archive-admission gates.
+   * Optional: a Host build without them cannot report a session's running
+   * work, and the delete route degrades instead of refusing every delete.
+   */
+  waterfall?: (
+    name: 'workspace/session-activity',
+    request: { sessionId: string },
+    next: () => Promise<readonly SessionActivity[]>,
+  ) => Promise<readonly SessionActivity[]>
+  /** Ask every provider to stop the session's work (`workspace/session-stop`). */
+  parallel?: (name: 'workspace/session-stop', request: { sessionId: string }) => Promise<void>
   sessionQuery: {
     listSessions: () => Promise<Array<{ header: { id: string; cwd?: string; origin?: string } }>>
     readTitleSnapshots: (ids: string[]) => Promise<Array<{
@@ -401,12 +431,15 @@ function apply(ctx: HostCtx): void {
    * one folder. Only the entries the caller names are touched, and the write is
    * atomic (see {@link writeRegistryAtomically}).
    *
-   * Three endings, three behaviours: a clean read is edited; a MISSING file is
-   * created; a file that could not be READ is left completely alone (its content
+   * Four endings, four behaviours: a clean read is edited; a MISSING file is
+   * created (or, with `onAbsent: 'leave'`, left absent — a caller that planned
+   * against a registry another Host has since removed must not publish an empty
+   * one); a file that could not be READ is left completely alone (its content
    * is unknown, so merging into it would destroy it — a warning is the honest
-   * answer); a file that parsed badly is quarantined as `.dsh-chat.json.corrupt-<ts>`
-   * first, so the bytes survive even though the entries they described do not
-   * come back from anywhere.
+   * answer); a file that parsed badly is quarantined as
+   * `.dsh-chat.json.corrupt-<ts>` first (or, with `onCorrupt: 'leave'`, left
+   * untouched: a delete is not a repair), so the bytes survive even though the
+   * entries they described do not come back from anywhere.
    *
    * The stamp check is optimistic concurrency: if the other Host wrote between
    * our read and our replace, this write would drop its entry, so the read is
@@ -415,8 +448,19 @@ function apply(ctx: HostCtx): void {
    * folder becomes adoptable), which is worth a warning but not a crash.
    * @param dateFolder - the dated folder whose registry is written.
    * @param edit - the one change to apply to the entries read from disk.
+   * @param options - the failure policy. `onCorrupt` (`'quarantine'` by default)
+   *   and `onAbsent` (`'create'` by default) exist for the delete route, whose
+   *   reads are a plan: it must neither quarantine nor recreate a shared file
+   *   that changed between the plan and this write.
    */
-  function editRegistry(dateFolder: string, edit: (sessions: Record<string, ChatFolderEntry>) => void): void {
+  function editRegistry(
+    dateFolder: string,
+    edit: (sessions: Record<string, ChatFolderEntry>) => void,
+    options: {
+      readonly onCorrupt?: 'quarantine' | 'leave'
+      readonly onAbsent?: 'create' | 'leave'
+    } = {},
+  ): void {
     const file = registryFile(dateFolder)
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const stamp = registryStamp(file)
@@ -425,10 +469,26 @@ function apply(ctx: HostCtx): void {
         console.warn(`[dsh-chat-manager] chat registry could not be read (${read.detail}); leaving it untouched: ${file}`)
         return
       }
+      if (read.status === 'absent' && options.onAbsent === 'leave') {
+        // A caller that plans against a registry it read moments ago must not
+        // recreate a file another Host removed in between: writing `{ sessions:
+        // {} }` would publish an empty registry nobody wrote, and the missing
+        // file is the other Host's answer (its entries are gone with it).
+        console.warn(`[dsh-chat-manager] chat registry disappeared before cleanup; leaving it absent: ${file}`)
+        return
+      }
       let sessions: Record<string, ChatFolderEntry> = {}
       if (read.status === 'ok') {
         sessions = read.sessions
       } else if (read.status === 'corrupt') {
+        // A caller that is not repairing the registry must leave the file
+        // alone: the delete route read this registry moments ago and decided
+        // from THAT answer, so a file that turned unreadable in between is not
+        // evidence that rebuilding it from an empty set is safe.
+        if (options.onCorrupt === 'leave') {
+          console.warn(`[dsh-chat-manager] chat registry became unreadable; leaving it untouched: ${file}`)
+          return
+        }
         // Quarantine the unreadable bytes before rebuilding: the entries in them
         // are lost either way (nothing else knows which chat a folder belongs
         // to), and keeping the file is what lets a person recover them by hand.
@@ -467,24 +527,45 @@ function apply(ctx: HostCtx): void {
   }
 
   /**
-   * Read every date folder under the chat root and load its registry.
-   * @returns the date folders found, in listing order (the boot pass also uses
-   *   them to make each one provisionable for DSH's Windows sandbox).
+   * List the date folders under the chat root, in listing order.
+   *
+   * The listing is separated from the boot scan because the delete route needs
+   * the same set WITHOUT the scan's side effects: the boot scan loads entries
+   * into this process's map, and a delete that only trusted that map missed an
+   * entry another Host registered after this process started.
+   * @returns the absolute path of every `YYYY-MM-DD` directory. An unknown or
+   *   absent chat root is a normal empty answer (the root is created on the
+   *   first chat); a root that exists but cannot be listed warns, because the
+   *   delete route's registry sweep silently degrades to "nothing to clean".
    */
-  function scanChatFolders(): string[] {
+  function listDateFolders(): string[] {
     const dateFolders: string[] = []
     if (!chatState.root || !fs.existsSync(chatState.root)) return dateFolders
     let names
     try {
       names = fs.readdirSync(chatState.root, { withFileTypes: true })
-    } catch {
+    } catch (err) {
+      console.warn('[dsh-chat-manager] chat root could not be listed;'
+        + ' chat registry cleanup is skipped:', errorMessage(err))
       return dateFolders
     }
     for (const d of names) {
       if (!d.isDirectory()) continue
       if (!/^\d{4}-\d{2}-\d{2}$/.test(d.name)) continue
-      const dateFolder = path.join(chatState.root, d.name)
-      dateFolders.push(dateFolder)
+      dateFolders.push(path.join(chatState.root, d.name))
+    }
+    return dateFolders
+  }
+
+  /**
+   * Read every date folder under the chat root and load its registry into this
+   * process's map (the boot pass; the delete route uses the bare listing).
+   * @returns the date folders found, in listing order (the boot pass also uses
+   *   them to make each one provisionable for DSH's Windows sandbox).
+   */
+  function scanChatFolders(): string[] {
+    const dateFolders = listDateFolders()
+    for (const dateFolder of dateFolders) {
       // Leftover registry temp files (an interrupted write: this process's
       // `writeRegistryAtomically` or a previous Host's) are dead weight in a
       // folder the probe's stray-file check watches. Only old ones go: a file
@@ -714,6 +795,101 @@ function apply(ctx: HostCtx): void {
     await ctx.workspaceRegistry.unarchiveSession(sid)
   }
 
+  /**
+   * What still runs for one session, through the platform's own activity gate
+   * (`workspace/session-activity`, the waterfall the registry asks before an
+   * archive). A Host build without the gate cannot report running work; that
+   * is logged and answered as "nothing runs", because refusing every delete on
+   * such a build would remove a working feature over a missing improvement.
+   * A gate that THROWS is not "no activity": the caller's 500 is the honest
+   * answer.
+   * @param sessionId - the session the delete route is about to remove.
+   * @returns the activity families the composed providers reported.
+   */
+  async function sessionActivity(sessionId: string): Promise<readonly SessionActivity[]> {
+    if (typeof ctx.waterfall !== 'function') {
+      console.warn('[dsh-chat-manager] this Host build exposes no workspace/session-activity gate;'
+        + ' deleting without an activity check')
+      return []
+    }
+    return await ctx.waterfall('workspace/session-activity', { sessionId }, () => Promise.resolve([]))
+  }
+
+  /**
+   * Ask every provider to stop the session's work (`workspace/session-stop`,
+   * the parallel dispatch the registry uses for `archiveSession` with
+   * `stopActivity`). A failure is fatal for the delete: the person confirmed a
+   * stop, and removing the log after a silent failure would strand work that
+   * can never write again.
+   * @param sessionId - the session whose work must stop.
+   */
+  async function stopSessionActivity(sessionId: string): Promise<void> {
+    if (typeof ctx.parallel !== 'function') {
+      throw new Error('this Host build exposes no workspace/session-stop: the running work cannot be stopped')
+    }
+    try {
+      await ctx.parallel('workspace/session-stop', { sessionId })
+    } catch (err) {
+      throw new Error(`failed to stop the session's running work (work already stopped stays stopped): ${errorMessage(err)}`)
+    }
+  }
+
+  /**
+   * Re-ask the activity gate a bounded number of times after a stop. The
+   * platform's stop requests are issued without waiting for running work to
+   * settle, so a turn or a job can still be winding down when the dispatch
+   * resolves. This wait shrinks the window in which that work writes into a
+   * directory the delete is about to remove; it is deliberately NOT a hard
+   * gate — a job in `stopping` counts as active, so waiting for an empty
+   * answer would hang the delete forever. A provider that throws while being
+   * re-asked only warns: the stop already landed, so turning that into a failed
+   * delete would report the opposite of what happened.
+   * @param sessionId - the session that was just asked to stop.
+   */
+  async function settleStoppedActivity(sessionId: string): Promise<void> {
+    for (let attempt = 0; attempt < DELETE_STOP_SETTLE_ATTEMPTS; attempt += 1) {
+      let remaining: readonly SessionActivity[]
+      try {
+        remaining = await sessionActivity(sessionId)
+      } catch (err) {
+        // The stop already landed (its own failure would have thrown above), so
+        // a provider that dies while being re-asked cannot undo it. Failing the
+        // request here would report "stop and delete" as failed while the work
+        // is in fact stopped; the wait is best-effort by design.
+        console.warn(`[dsh-chat-manager] delete-session: re-asking activity for ${sessionId} failed;`
+          + ' deleting after the confirmed stop:', errorMessage(err))
+        return
+      }
+      if (remaining.length === 0) return
+      await new Promise<void>((resolve) => { setTimeout(resolve, DELETE_STOP_SETTLE_MS) })
+    }
+    console.warn(`[dsh-chat-manager] delete-session: ${sessionId} still reports running work after a stop;`
+      + ' deleting anyway (the stopped work cannot write after the log is gone)')
+  }
+
+  /**
+   * The 409 text for a delete refused because work still runs.
+   * @param activity - the reported families, named in the message.
+   * @returns one line a person can act on.
+   */
+  function activeDeleteRefusal(activity: readonly SessionActivity[]): string {
+    const kinds = [...new Set(activity.map(entry => entry.kind))].join(', ')
+    return `the session still has running work (${kinds || 'unknown'}): confirm stopping it to delete the session`
+  }
+
+  /**
+   * Report one failed artifact stage and fail the request. Resolution and
+   * removal answer with the same 500 text (the client shows one
+   * "failed to remove session log" line), so both the prefix and the log shape
+   * live here rather than in two identical catch blocks.
+   * @param stage - which stage failed, for the log line.
+   * @param err - the stage's failure.
+   */
+  function failArtifactStage(stage: string, err: unknown): never {
+    console.warn(`[dsh-chat-manager] ${stage}:`, errorMessage(err))
+    throw new Error(`failed to remove session log: ${errorMessage(err)}`)
+  }
+
   // ---- routes ----
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
@@ -872,9 +1048,23 @@ function apply(ctx: HostCtx): void {
         const body = await readBody(req)
         const sid = String(body.sessionId ?? '')
         if (!sid) return sendJson(res, 400, { error: 'missing sessionId' })
-        // 1) Durable artifact first: remove the persisted log. A failure here
-        //    fails the request and leaves the archive/workspace state untouched,
-        //    so a broken delete can never resurrect the session into a list.
+        // `stopActivity` is the client's answer to the 409 below, so only the
+        // literal `true` confirms stopping work — a stray "true" or a 1 must
+        // never stop a turn the person did not agree to stop.
+        const stopActivity = body.stopActivity === true
+        // Phase 1 — name the durable artifact, read-only. Nothing is written or
+        // removed before the activity gate has answered: a delete refused for
+        // running work must leave the log, the ledger and the pins as they were.
+        // A failure here fails the request, so a broken delete can never
+        // resurrect the session into a list.
+        let artifact: { path: string; dir: string; removal: ReturnType<typeof planSessionArtifactRemoval> } | null = null
+        // The Host's public live lookup (the same call the Workspace registry's
+        // own `sessionKnown` uses). Both branches below consult it: a Session the
+        // Host still holds live can grow an artifact again, so no branch may
+        // report success without one.
+        const live = ctx.get('sessions')?.get?.(sid)
+        const liveWarning = ' the Host still holds it live, so a later flush could write it back:'
+          + ' restart the Host and retry.'
         try {
           // `list()` returns snapshots, and a snapshot carries its metadata
           // under `.header` — there is no `.id` on the snapshot itself. Reading
@@ -886,13 +1076,6 @@ function apply(ctx: HostCtx): void {
           const snapshot = snapshots.find(
             (entry: { header?: { id?: string } }) => entry.header?.id === sid,
           ) ?? await ctx.sessionPersistence.stat(sid)
-          // The Host's public live lookup (the same call the Workspace registry's
-          // own `sessionKnown` uses). Both branches below consult it: a Session the
-          // Host still holds live can grow an artifact again, so no branch may
-          // report success without one.
-          const live = ctx.get('sessions')?.get?.(sid)
-          const liveWarning = ' the Host still holds it live, so a later flush could write it back:'
-            + ' restart the Host and retry.'
           if (snapshot === undefined) {
             // The Host names no stored Session. Two very different situations reach
             // here, and only one of them may answer 200:
@@ -915,27 +1098,45 @@ function apply(ctx: HostCtx): void {
             }
             console.warn(`[dsh-chat-manager] delete-session: the Host reports no stored session for ${sid}; removing accounting only`)
           } else {
-            // `locate` is the backend's own artifact mapping (kind + absolute
-            // path) from a stored header. It is the JSONL backend's private
-            // refusal-diagnostics hook, so a Host build without it cannot name
-            // the artifact — and a delete that cannot name its artifact must
-            // not report success.
-            if (typeof ctx.sessionPersistence.locate !== 'function') {
-              throw new Error('this Host build exposes no sessionPersistence.locate: the session log cannot be removed')
+            // The public `snapshot.location` is the contract (0.2.2+); the
+            // JSONL backend's private `locate` is only the fallback — for an
+            // older Host build, and for a pending session whose snapshot
+            // carries no location yet. Calling the hook first is what made the
+            // route depend on a private API for no reason.
+            const locationPath = typeof snapshot.location?.path === 'string' && snapshot.location.path !== ''
+              ? snapshot.location.path
+              : undefined
+            // Called ON the service, never extracted: the backend's hook reads
+            // its own state off `this` (a bare `const locate = …` call lost it
+            // and answered `Cannot read properties of undefined (reading 'root')`).
+            const locateAvailable = typeof ctx.sessionPersistence.locate === 'function'
+            let locatedPath: string | undefined
+            if (locationPath === undefined && locateAvailable) {
+              const located = ctx.sessionPersistence.locate!(snapshot.header)
+              if (typeof located?.path === 'string' && located.path !== '') locatedPath = located.path
             }
-            const located = ctx.sessionPersistence.locate(snapshot.header)
-            const artifact: unknown = located?.path
-            if (typeof artifact !== 'string' || artifact === '') {
-              throw new Error(`the Host named no session log for ${sid}`)
+            const resolved = pickSessionArtifactPath({ locationPath, locateAvailable, locatedPath })
+            if ('failure' in resolved) {
+              // The two failures need different answers: one is a Host build
+              // this plugin cannot work with, the other a session the Host
+              // cannot map to an artifact.
+              throw new Error(resolved.failure === 'no-public-location-and-no-hook'
+                ? 'this Host build exposes neither snapshot.location nor sessionPersistence.locate:'
+                  + ' the session log cannot be removed'
+                : `the Host named no session log for ${sid}`)
             }
-            // `locate` names the file the CURRENT format would write
-            // (`session.v4.jsonl.zstd`), while a migrated Session keeps its
-            // earlier generations beside it (`session.jsonl.zstd` +
-            // `session.v3.jsonl.zstd`). The durable unit is therefore the
+            const artifactPath = resolved.path
+            // The resolved path names ONE generation of the log, and which one
+            // differs by source: `locate` maps the file the current format
+            // would write (`session.v4.jsonl.zstd`), while `snapshot.location`
+            // carries the backend's selected source, which for a migrated
+            // Session can be an older generation (`session.jsonl.zstd`). Either
+            // way a migrated Session keeps its other generations beside it
+            // (`session.v3.jsonl.zstd`, …), so the durable unit is the
             // Session's own directory, not that one file name: removing only
-            // the located path deleted nothing at all and left the Session to
+            // the resolved path deleted nothing at all and left the Session to
             // reappear on the next Host start.
-            const dir = path.dirname(artifact)
+            const dir = path.dirname(artifactPath)
             // Only a directory named after this Session may go wholesale;
             // anything else falls back to the single located file.
             const ownsDir = path.basename(dir) === sid
@@ -950,14 +1151,47 @@ function apply(ctx: HostCtx): void {
               live: live !== undefined,
               artifactInSessionDirectory: ownsDir,
             })
+            // Refuse BEFORE the activity gate: stopping a live session's work
+            // does not release its POSIX lease, so asking the person to stop
+            // running work for a delete that would be refused anyway only
+            // costs them that work.
             if (removal === 'refuse-live-posix') throw new Error(POSIX_LIVE_DELETE_REFUSAL)
-            // Materialize BEFORE removing, unconditionally: a Session this
-            // process still tracks may hold bytes the backend has not written,
-            // and a later (shutdown) flush would recreate what this delete just
-            // removed — the artifact merely existing on disk does not prove
-            // there is nothing pending. `flush` is the service's documented
-            // durability barrier; a failure only warns, because the removal and
-            // the verification below still have to prove themselves.
+            artifact = { path: artifactPath, dir, removal }
+          }
+        } catch (err) {
+          failArtifactStage('artifact resolution failed', err)
+        }
+        // 2) Activity gate. Both branches pass through it: a session whose log
+        //    is already gone can still own a job or a schedule — those
+        //    providers read their own registries, not the log. The 409 is a
+        //    deliberate answer, so it must stay OUTSIDE the artifact
+        //    try/catch above (that catch rewrites every failure into a 500).
+        const activity = await sessionActivity(sid)
+        const gate = planActivityGate(activity, stopActivity)
+        if (gate === 'refuse') {
+          return sendJson(res, 409, {
+            error: activeDeleteRefusal(activity),
+            active: true,
+            activity,
+          })
+        }
+        if (gate === 'stop') {
+          // Fail closed: if the Host cannot stop that work, deleting the log
+          // anyway would promise a stop that never happened. Nothing has been
+          // removed yet, so a retry is safe (work already stopped stays so).
+          await stopSessionActivity(sid)
+          await settleStoppedActivity(sid)
+        }
+        // 3) Remove the artifact. Materialize BEFORE removing, unconditionally:
+        //    a Session this process still tracks may hold bytes the backend has
+        //    not written, and a later (shutdown) flush would recreate what this
+        //    delete just removed — the artifact merely existing on disk does
+        //    not prove there is nothing pending. `flush` is the service's
+        //    documented durability barrier; a failure only warns, because the
+        //    removal and the verification below still have to prove themselves.
+        if (artifact !== null) {
+          const { path: artifactPath, dir, removal } = artifact
+          try {
             try {
               await ctx.sessionPersistence.flush()
             } catch (err) {
@@ -968,9 +1202,9 @@ function apply(ctx: HostCtx): void {
               // Verified removal: a locked or undeletable artifact must fail the
               // request instead of leaving a Session that comes back later.
               if (fs.existsSync(dir)) throw new Error(`session log survived removal: ${dir}`)
-            } else if (fs.existsSync(artifact)) {
-              fs.rmSync(artifact, { recursive: true, force: true })
-              if (fs.existsSync(artifact)) throw new Error(`session log survived removal: ${artifact}`)
+            } else if (fs.existsSync(artifactPath)) {
+              fs.rmSync(artifactPath, { recursive: true, force: true })
+              if (fs.existsSync(artifactPath)) throw new Error(`session log survived removal: ${artifactPath}`)
               // This branch ran because the artifact sits outside a directory
               // named after the Session, so the directory cannot be removed
               // wholesale: any sibling generation left behind would resurrect
@@ -989,19 +1223,43 @@ function apply(ctx: HostCtx): void {
                 + (live === undefined ? '' : `;${liveWarning}`),
               )
             }
-          }
-        } catch (err) {
-          console.warn('[dsh-chat-manager] artifact removal failed:', errorMessage(err))
-          throw new Error(`failed to remove session log: ${errorMessage(err)}`)
-        }
-        // 2) Workspace accounting: detach the session from every workspace
-        //    record that still lists it (sanctioned registry write path).
-        for (const workspace of ctx.workspaceRegistry.list()) {
-          if (workspace.sessionIds.includes(sid)) {
-            await workspace.detachSession(sid)
+          } catch (err) {
+            failArtifactStage('artifact removal failed', err)
           }
         }
-        // 3) Best-effort pin cleanup. The pin set is registry-global, so a
+        // 4) Accounting plan. Both steps share one rule: a filtered view is not
+        //    evidence. The workspace getter hides ids the persistence layer
+        //    cannot resolve, and this process's registry map hides an entry
+        //    another Host wrote after this process started.
+        const workspaces = ctx.workspaceRegistry.list()
+        const registryReads: AccountingRegistry[] = listDateFolders().map((dateFolder) => {
+          const read = readRegistryFile(dateFolder)
+          return read.status === 'ok'
+            // `Object.hasOwn`, not `sid in sessions`: a parsed registry inherits
+            // from Object.prototype, so `'constructor' in sessions` (and every
+            // other prototype key) would read as "registered here" and rewrite
+            // a file that never named it.
+            ? { dateFolder, read: 'ok', hasSession: Object.hasOwn(read.sessions, sid) }
+            : { dateFolder, read: read.status }
+        })
+        const accounting = planDeleteAccounting({
+          workspaces: workspaces.map(workspace => ({ id: workspace.id })),
+          registryFolders: registryReads,
+        })
+        // 5) Workspace accounting: detach from EVERY workspace, not only the
+        //    ones that still list the id. `sessionIds` filters ids the
+        //    persistence layer cannot resolve, so a ghost row looks unlisted
+        //    while its record still carries the slot; the entity's own write
+        //    path makes the no-op case free (a record that does not list the id
+        //    is returned verbatim, so nothing is written). A failure here still
+        //    fails the request: the archive set must not change over an
+        //    accounting error.
+        const workspaceById = new Map(workspaces.map(workspace => [workspace.id, workspace]))
+        for (const workspaceId of accounting.detachWorkspaceIds) {
+          const workspace = workspaceById.get(workspaceId)
+          if (workspace !== undefined) await workspace.detachSession(sid)
+        }
+        // 6) Best-effort pin cleanup. The pin set is registry-global, so a
         //    deleted id would linger there forever; `unpinSession` is the
         //    platform's own write (idempotent, and, unlike `pinSession`, it
         //    checks no session existence — the log is already gone by now). A
@@ -1013,18 +1271,23 @@ function apply(ctx: HostCtx): void {
         } catch (err) {
           console.warn('[dsh-chat-manager] pin cleanup failed:', errorMessage(err))
         }
-        // 4) Chat-folder registry cleanup (best-effort; the folder itself
-        //    stays on disk). Runs before the archive removal below, so an
-        //    unexpected failure here also leaves the archive untouched. The id
-        //    is named explicitly: the registry is a read-modify-write shared
-        //    with the other Host, so "absent from this process's map" is not
-        //    enough to retire an entry.
-        const entry = chatState.folders.get(sid)
-        if (entry) {
-          chatState.folders.delete(sid)
-          editRegistry(path.dirname(entry.folder), (sessions) => { delete sessions[sid] })
+        // 7) Chat-folder registry cleanup (best-effort; the folder itself stays
+        //    on disk). Runs before the archive removal below, so an unexpected
+        //    failure here also leaves the archive untouched. The plan named
+        //    every date folder whose parsed registry carries the id — including
+        //    folders this process never scanned into its map, which is how an
+        //    entry another Host registered after this process started gets
+        //    retired. Registries that cannot be read or parsed are left exactly
+        //    as they are: a delete is not the place to quarantine a shared file
+        //    and rebuild it from an empty set.
+        chatState.folders.delete(sid)
+        for (const warning of accounting.warnings) {
+          console.warn(`[dsh-chat-manager] chat registry left untouched (${warning.reason}): ${warning.dateFolder}`)
         }
-        // 5) Best-effort projection-cache cleanup. The platform's
+        for (const dateFolder of accounting.clearRegistryFolders) {
+          editRegistry(dateFolder, (sessions) => { delete sessions[sid] }, { onCorrupt: 'leave', onAbsent: 'leave' })
+        }
+        // 8) Best-effort projection-cache cleanup. The platform's
         //    session_projcache domain has no prune path (rows are written
         //    once per session and never removed), so without this a deleted
         //    session's checkpoint would linger in the cache file forever.
@@ -1037,7 +1300,7 @@ function apply(ctx: HostCtx): void {
         } catch (err) {
           console.warn('[dsh-chat-manager] projection cache cleanup failed:', errorMessage(err))
         }
-        // 6) Un-archive LAST: every fallible step above has succeeded, so the
+        // 9) Un-archive LAST: every fallible step above has succeeded, so the
         //    archive set only changes on a fully successful delete. A failure
         //    anywhere before this point 500s and leaves the archive intact
         //    (a broken delete can never resurrect the session into a list).
@@ -1127,12 +1390,16 @@ export { apply, inject, name }
 // Re-exported for the decision-table tests and the ACL acceptance probe: this
 // host cannot run the POSIX branch (or a real icacls/ACL evaluation) under test,
 // so `test/*.test.mjs` pins the pure seams from the built bundle — the
-// session-removal plan, the chat-folder section text and its delivery trigger
-// (whose assembly/delivery context no probe can read without spending a model
-// turn), and the DACL reader/decision the Windows folder check is built from —
-// while `.scratch/accept11-acl-deny-shapes.mjs` drives `ensureWindowsFolderAccess`
-// itself (the same bundle the Host runs) against real folders and DSH's own grant.
+// session-removal plan, the delete route's activity gate, artifact-path pick and
+// accounting rules (whose 409/stop wiring `test/delete-route.test.mjs` drives
+// through the built `apply`), the chat-folder section text and its delivery
+// trigger (whose assembly/delivery context no probe can read without spending a
+// model turn), and the DACL reader/decision the Windows folder check is built
+// from — while `.scratch/accept11-acl-deny-shapes.mjs` drives
+// `ensureWindowsFolderAccess` itself (the same bundle the Host runs) against
+// real folders and DSH's own grant.
 export { planSessionArtifactRemoval }
+export { pickSessionArtifactPath, planActivityGate, planDeleteAccounting } from './shared/delete-plan.ts'
 export { chatFolderSectionText, chatFolderState, chatFolderStateFor, chatPromptTrigger, SUBAGENT_ORIGIN } from './shared/prompt-section.ts'
 export {
   ensureWindowsFolderAccess, evaluateDacl, hasTokenGroups, parseDaclSddl, parseOwnSid, parseTokenSids,
